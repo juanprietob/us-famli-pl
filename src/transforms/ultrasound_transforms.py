@@ -19,6 +19,7 @@ from monai.transforms import (
     RandRotate,
     CenterSpatialCrop,
     ScaleIntensityRange,
+    ScaleIntensity,
     RandAdjustContrast,
     RandGaussianNoise,
     RandGaussianSmooth,
@@ -218,6 +219,26 @@ class SimTrainTransformsV2:
                 transforms.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2]),
                 transforms.RandomHorizontalFlip(),
                 transforms.Compose([transforms.RandomRotation(180), transforms.Pad(32), transforms.RandomCrop(height)])
+            ]
+        )
+
+    def __call__(self, inp):
+        q = self.train_transform(inp)
+        k = self.train_transform(inp)
+        return q, k
+
+#additional transforms
+class SimTrainTransformsV3:
+    def __init__(self, height: int = 128):
+
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
+                transforms.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2]),
+                transforms.RandomHorizontalFlip(),
+                transforms.Compose([transforms.RandomRotation(180), transforms.Pad(32), transforms.RandomCrop(height)]),
+                transforms.Sobel(3)
             ]
         )
 
@@ -573,6 +594,41 @@ class DiffusionEvalTransforms:
 
     def __call__(self, inp):
         return self.eval_transform(inp)
+
+
+
+
+
+
+
+class DiffusionTrainTransformsPaired:
+    def __init__(self, height: int = 256):
+
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim='no_channel')
+                # ScaleIntensity()
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.train_transform(inp)        
+
+class DiffusionEvalTransformsPaired:
+    def __init__(self, height: int = 256):
+
+        self.eval_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim='no_channel')
+                # ScaleIntensity()
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+
 
 
 

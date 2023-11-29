@@ -63,10 +63,10 @@ class AutoEncoderKL(pl.LightningModule):
             spatial_dims=2,
             in_channels=1,
             out_channels=1,
-            num_channels=(128, 128, 256),
+            num_channels=(128, 128, 256, 512),
             latent_channels=latent_channels,
             num_res_blocks=2,
-            attention_levels=(False, False, False),
+            attention_levels=(False, False, False, False),
             with_encoder_nonlocal_attn=False,
             with_decoder_nonlocal_attn=False,
         )
@@ -189,6 +189,119 @@ class AutoEncoderKL(pl.LightningModule):
 
         reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
         recon_loss = F.l1_loss(x.float(), reconstruction.float())
+
+        self.log("val_loss", recon_loss, sync_dist=True)
+
+        
+
+
+    def forward(self, images):        
+        return self.autoencoderkl(images)
+
+
+class AutoEncoderKLPaired(pl.LightningModule):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+
+        latent_channels = 3
+        if hasattr(self.hparams, "latent_channels"):
+            latent_channels = self.hparams.latent_channels
+
+        self.autoencoderkl = nets.AutoencoderKL(
+            spatial_dims=2,
+            in_channels=1,
+            out_channels=1,
+            num_channels=(128, 128, 256),
+            latent_channels=latent_channels,
+            num_res_blocks=2,
+            attention_levels=(False, False, False),
+            with_encoder_nonlocal_attn=False,
+            with_decoder_nonlocal_attn=False,
+        )
+
+        self.perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex")
+
+        self.automatic_optimization = False
+
+        self.discriminator = nets.PatchDiscriminator(spatial_dims=2, num_layers_d=3, num_channels=64, in_channels=1, out_channels=1)        
+
+        self.adversarial_loss = PatchAdversarialLoss(criterion="least_squares")        
+
+        self.noise_transform = torch.nn.Sequential(
+            GaussianNoise(0.0, 0.05),
+            RandCoarseShuffle(),
+            SaltAndPepper()
+            
+        )
+        
+
+    def configure_optimizers(self):
+        optimizer_g = optim.AdamW(self.autoencoderkl.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+
+        optimizer_d = optim.AdamW(self.discriminator.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+
+        return [optimizer_g, optimizer_d]
+
+    def training_step(self, train_batch, batch_idx):
+        x = train_batch[0]
+        y = train_batch[1]
+
+        optimizer_g, optimizer_d = self.optimizers()
+        
+        optimizer_g.zero_grad()
+
+        reconstruction, z_mu, z_sigma = self.autoencoderkl(self.noise_transform(x))
+
+        recons_loss = F.l1_loss(reconstruction.float(), y.float())
+        p_loss = self.perceptual_loss(reconstruction.float(), y.float())
+        kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3])
+        kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
+        loss_g = recons_loss + (self.hparams.kl_weight * kl_loss) + (self.hparams.perceptual_weight * p_loss)
+
+        if self.trainer.current_epoch > self.hparams.autoencoder_warm_up_n_epochs:
+            logits_fake = self.discriminator(reconstruction.contiguous().float())[-1]
+            generator_loss = self.adversarial_loss(logits_fake, target_is_real=True, for_discriminator=False)
+            loss_g += self.hparams.adversarial_weight * generator_loss
+
+        loss_g.backward()
+        optimizer_g.step()
+        
+        loss_d = 0
+        if self.trainer.current_epoch > self.hparams.autoencoder_warm_up_n_epochs:
+            
+            optimizer_d.zero_grad()
+
+            logits_fake = self.discriminator(reconstruction.contiguous().detach())[-1]
+            loss_d_fake = self.adversarial_loss(logits_fake, target_is_real=False, for_discriminator=True)
+            logits_real = self.discriminator(y.contiguous().detach())[-1]
+            loss_d_real = self.adversarial_loss(logits_real, target_is_real=True, for_discriminator=True)
+            discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
+
+            loss_d = self.hparams.adversarial_weight * discriminator_loss
+
+            loss_d.backward()
+            optimizer_d.step()
+
+        self.log("train_loss_g", loss_g)
+        self.log("train_loss_d", loss_d)
+
+        return {"train_loss_g": loss_g, "train_loss_d": loss_d}
+        
+
+    def validation_step(self, val_batch, batch_idx):
+        x = val_batch[0]
+        y = val_batch[1]
+        # with autocast(enabled=True):
+        #     reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
+        #     recon_loss = F.l1_loss(x.float(), reconstruction.float())
+
+        reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
+        recon_loss = F.l1_loss(y.float(), reconstruction.float())
 
         self.log("val_loss", recon_loss, sync_dist=True)
 

@@ -1024,3 +1024,63 @@ class SimNorth(pl.LightningModule):
 
     def forward(self, x):
         return self.convnet(x)
+
+
+#Changes to loss function according to Wang(2020)
+class ModSimScoreOnlyW(pl.LightningModule):
+    def __init__(self, args=None, base_encoder='efficientnet_b0', emb_dim=128, lr=1e-3, w=4.0, alpha=0.1, beta=0.3, weight_decay=1e-4, max_epochs=50):
+        super().__init__()
+        self.save_hyperparameters()
+        self.lam = 1.0
+        template_model = getattr(torchvision.models, self.hparams.base_encoder)
+        self.convnet = template_model(num_classes=4*self.hparams.emb_dim)
+
+        if hasattr(self.convnet, 'classifier'):
+            self.convnet.classifier = nn.Sequential(
+                self.convnet.classifier,
+                ProjectionHead(input_dim=4*self.hparams.emb_dim, hidden_dim=64, output_dim=self.hparams.emb_dim)
+            )            
+
+        elif hasattr(self.convnet, 'fc'):
+        
+            self.convnet.fc = nn.Sequential(
+                self.convnet.fc,  # Linear(ResNet output, 4*hidden_dim)
+                ProjectionHead(input_dim=4*self.hparams.emb_dim, hidden_dim=64, output_dim=self.hparams.emb_dim)
+            )
+
+        self.loss = nn.CosineSimilarity()
+
+        self.noise_transform = torch.nn.Sequential(
+            GaussianNoise()
+        )
+
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+        lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.hparams.max_epochs, eta_min=self.hparams.lr/50)
+        return [optimizer], [lr_scheduler]
+
+    def lalign(self, x, y, alpha=2):
+        return (x - y).norm(dim=1).pow(alpha).mean()
+    
+    def lunif(self, x, t=2):
+        sq_pdist = torch.pdist(x, p=2).pow(2)
+        return sq_pdist.mul(-t).exp().mean().log()
+
+    def alignUnifLoss(self, x, y, mode):
+
+        alignUnifLoss = self.lalign(x, y) + self.lam * (self.lunif(x) + self.lunif(y)) / 2
+        self.log(mode + '_loss_proj', alignUnifLoss)
+
+    def training_step(self, batch, batch_idx):
+        (x_0, x_1), score = batch
+        return self.alignUnifLoss(x_0, x_1, mode='train')
+
+    def validation_step(self, batch, batch_idx):
+        (x_0, x_1), score = batch
+        self.alignUnifLoss(x_0, x_1, mode='val')
+
+    def forward(self, x):
+        return self.convnet(x)

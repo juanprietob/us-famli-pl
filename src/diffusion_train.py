@@ -8,9 +8,9 @@ import numpy as np
 import torch
 from torch.distributed import is_initialized, get_rank
 
-from loaders.ultrasound_dataset import USDataModule, USDataModuleBlindSweep
-from transforms.ultrasound_transforms import DiffusionEvalTransforms, DiffusionTrainTransforms
-from callbacks.logger import DiffusionImageLogger, DiffusionImageLoggerNeptune
+from loaders.ultrasound_dataset import USDataModule, SimuDataModule
+from transforms.ultrasound_transforms import DiffusionEvalTransforms, DiffusionTrainTransforms, DiffusionTrainTransformsPaired, DiffusionEvalTransformsPaired
+from callbacks.logger import DiffusionImageLogger, DiffusionImageLoggerNeptune, DiffusionImageLoggerPairedNeptune
 
 from nets import diffusion
 
@@ -43,7 +43,15 @@ def main(args):
     train_transform = DiffusionTrainTransforms()
     valid_transform = DiffusionEvalTransforms()
 
-    usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column='img_path', drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False)
+    if args.target_column:
+        
+        train_transform = DiffusionTrainTransformsPaired()
+        valid_transform = DiffusionEvalTransformsPaired()
+
+        usdata = SimuDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False, target_column=args.target_column)
+    else:
+
+        usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False)
 
     
 
@@ -67,7 +75,10 @@ def main(args):
             tags=args.neptune_tags,
             api_key=os.environ['NEPTUNE_API_TOKEN']
         )
-        image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images)
+        if args.target_column:
+            image_logger = DiffusionImageLoggerPairedNeptune(num_images=args.num_images)
+        else:
+            image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images)
 
     trainer = Trainer(
         logger=logger,
@@ -106,6 +117,8 @@ if __name__ == '__main__':
     input_group.add_argument('--nn', help='Type of neural network', type=str, default="AutoEncoderKL")
     input_group.add_argument('--model', help='Model to continue training', type=str, default= None)
     input_group.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")    
+    input_group.add_argument('--img_column', help='Name of the column with source images', type=str, default="img_path")    
+    input_group.add_argument('--target_column', help='Name of the column for the target images', type=str, default=None)    
     input_group.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
     input_group.add_argument('--csv_train', required=True, type=str, help='Train CSV')
     input_group.add_argument('--csv_valid', required=True, type=str, help='Valid CSV')
