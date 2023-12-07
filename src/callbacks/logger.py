@@ -455,3 +455,106 @@ class DiffusionImageLoggerMRUSNeptune(Callback):
                 ax = plt.imshow(grid_x_us_mr_hat.permute(1, 2, 0).cpu().numpy())
                 trainer.logger.experiment["images/x_us_mr_hat"].upload(fig)
                 plt.close()
+
+
+class ImageLoggerMustUSNeptune(Callback):
+    def __init__(self, num_images=16, log_steps=100):
+        self.log_steps = log_steps
+        self.num_images = num_images
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, unused=0):
+        
+        if batch_idx % self.log_steps == 0:
+            with torch.no_grad():
+                x_must, x_us = batch
+
+                max_num_image = min(x_must.shape[0], self.num_images)
+
+                x_must_us = pl_module.get_a(x_must)
+                x_must_hat = pl_module.get_b(x_must_us)
+
+                x_must_us = torch.clip(x_must_us, min=0.0, max=1.0)
+                x_must_hat = torch.clip(x_must_hat, min=0.0, max=1.0)
+
+
+                grid_x_must = torchvision.utils.make_grid(x_must[0:max_num_image])
+                grid_x_must_us = torchvision.utils.make_grid(x_must_us[0:max_num_image])
+                grid_x_must_hat = torchvision.utils.make_grid(x_must_hat[0:max_num_image])
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_must.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_must"].upload(fig)
+                plt.close()
+
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_must_us.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_must_us"].upload(fig)
+                plt.close()
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_must_hat.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_must_hat"].upload(fig)
+                plt.close()
+
+
+                x_us_must = pl_module.get_a(x_us)
+                x_us_hat = pl_module.get_b(x_us_must)
+
+                x_us_must = torch.clip(x_us_must, min=0.0, max=1.0)
+                x_us_hat = torch.clip(x_us_hat, min=0.0, max=1.0)
+
+
+                grid_x_us = torchvision.utils.make_grid(x_us[0:max_num_image])
+                grid_x_us_must = torchvision.utils.make_grid(x_us_must[0:max_num_image])
+                grid_x_us_hat = torchvision.utils.make_grid(x_us_hat[0:max_num_image])
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_us.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_us"].upload(fig)
+                plt.close()
+
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_us_must.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_us_must"].upload(fig)
+                plt.close()
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_us_hat.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_us_hat"].upload(fig)
+
+
+class ImageLoggerLotusNeptune(Callback):
+    def __init__(self, num_images=16, log_steps=100):
+        self.log_steps = log_steps
+        self.num_images = num_images
+    def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx, unused=0):
+        
+        if batch_idx % self.log_steps == 0:
+            with torch.no_grad():
+                x_label, x_us = batch
+
+                max_num_image = min(x_label.shape[0], self.num_images)
+
+                x_lotus_us = pl_module.get_us(x_label)
+                x_lotus_us = torch.clip(x_lotus_us, min=0.0, max=1.0)
+
+
+                x_label = x_label/torch.max(x_label)
+                grid_x_label = torchvision.utils.make_grid(x_label[0:max_num_image])
+                grid_x_lotus_us = torchvision.utils.make_grid(x_lotus_us[0:max_num_image])
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_label.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_label"].upload(fig)
+                plt.close()
+
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_lotus_us.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_lotus_us"].upload(fig)
+                plt.close()
+
+                grid_x_us = torchvision.utils.make_grid(x_us[0:max_num_image])                
+                
+                fig = plt.figure(figsize=(7, 9))
+                ax = plt.imshow(grid_x_us.permute(1, 2, 0).cpu().numpy())
+                trainer.logger.experiment["images/x_us"].upload(fig)
+                plt.close()

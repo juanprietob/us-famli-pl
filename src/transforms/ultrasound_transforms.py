@@ -20,6 +20,7 @@ from monai.transforms import (
     CenterSpatialCrop,
     ScaleIntensityRange,
     ScaleIntensity,
+    ToTensor, 
     RandAdjustContrast,
     RandGaussianNoise,
     RandGaussianSmooth,
@@ -597,7 +598,101 @@ class DiffusionEvalTransforms:
 
 
 
+class LabelTrainTransforms:
+    def __init__(self, height: int = 256):
 
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [   
+                ToTensor(),             
+                transforms.RandomHorizontalFlip(),
+                transforms.RandomChoice([
+                    transforms.Compose([transforms.RandomRotation(30), transforms.Pad(32), transforms.RandomCrop(height)]),
+                    transforms.RandomResizedCrop(size=height, scale=(0.4, 1.0), ratio=(0.75, 1.3333333333333333))                
+                ])
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.train_transform(inp)        
+
+class LabelEvalTransforms:
+    def __init__(self, height: int = 256):
+
+        self.eval_transform = transforms.Compose(
+            [
+                ToTensor(),
+                transforms.CenterCrop(height)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+class MustTrainTransforms:
+    def __init__(self, height: int = 256):
+
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim='no_channel'),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
+                transforms.RandomHorizontalFlip()
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.train_transform(inp)        
+
+class MustEvalTransforms:
+    def __init__(self, height: int = 256):
+
+        self.eval_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim='no_channel'),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
+                transforms.CenterCrop(height)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+
+class FirstChannelOnly:
+    def __call__(self, inp):
+        return inp[0:1]
+
+class RealUSTrainTransforms:
+    def __init__(self, height: int = 256):
+
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim=2),
+                FirstChannelOnly(),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
+                transforms.RandomHorizontalFlip()
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.train_transform(inp)        
+
+class RealEvalTransforms:
+    def __init__(self, height: int = 256):
+
+        self.eval_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim=2),
+                FirstChannelOnly(),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
+                transforms.CenterCrop(height)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
 
 
 

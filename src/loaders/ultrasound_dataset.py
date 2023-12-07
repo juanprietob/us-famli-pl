@@ -601,3 +601,4 @@ class USZDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last)
+

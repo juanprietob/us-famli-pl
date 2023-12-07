@@ -10,10 +10,9 @@ from torch.distributed import is_initialized, get_rank
 
 from loaders.mr_dataset import MRDatasetVolumes
 from loaders.ultrasound_dataset import USDataset
-from loaders.mr_us_dataset import MRUSDataModule, StackDataset, ConcatDataset
-from transforms.mr_transforms import MRDiffusionEvalTransforms, MRDiffusionTrainTransforms
-from transforms.ultrasound_transforms import DiffusionEvalTransforms, DiffusionTrainTransforms
-from callbacks.logger import DiffusionImageLoggerMRUS, DiffusionImageLoggerMRUSNeptune
+from loaders.mr_us_dataset import MUSTUSDataModule
+from transforms.ultrasound_transforms import MustEvalTransforms, MustTrainTransforms, RealUSTrainTransforms, RealEvalTransforms
+from callbacks.logger import ImageLoggerMustUSNeptune
 
 from nets import diffusion
 
@@ -32,54 +31,52 @@ warnings.filterwarnings("ignore", message="Divide by zero (a_min == a_max)")
 
 def main(args):
 
-    if(os.path.splitext(args.csv_train_mr)[1] == ".csv"):
-        df_train_mr = pd.read_csv(os.path.join(args.mount_point, args.csv_train_mr))    
-        df_val_mr = pd.read_csv(os.path.join(args.mount_point, args.csv_valid_mr))    
+    if(os.path.splitext(args.csv_train_must)[1] == ".csv"):
+        df_train_must = pd.read_csv(args.csv_train_must)
+        df_val_must = pd.read_csv(args.csv_valid_must)   
     else:
-        df_train_mr = pd.read_parquet(os.path.join(args.mount_point, args.csv_train_mr))    
-        df_val_mr = pd.read_parquet(os.path.join(args.mount_point, args.csv_valid_mr))    
+        df_train_must = pd.read_parquet(args.csv_train_must)
+        df_val_must = pd.read_parquet(args.csv_valid_must)   
 
     if(os.path.splitext(args.csv_train_us)[1] == ".csv"):
-        df_train_us = pd.read_csv(os.path.join(args.mount_point, args.csv_train_us))    
-        df_val_us = pd.read_csv(os.path.join(args.mount_point, args.csv_valid_us))    
+        df_train_us = pd.read_csv(args.csv_train_us)
+        df_val_us = pd.read_csv(args.csv_valid_us)   
     else:
-        df_train_us = pd.read_parquet(os.path.join(args.mount_point, args.csv_train_us))    
-        df_val_us = pd.read_parquet(os.path.join(args.mount_point, args.csv_valid_us))    
+        df_train_us = pd.read_parquet(args.csv_train_us)
+        df_val_us = pd.read_parquet(args.csv_valid_us)   
 
-
-    # NN_MR = getattr(diffusion, args.nn_mr)
-    # model_mr = NN_MR(**vars(args)).load_from_checkpoint(args.model_mr)
-    # model_mr.eval()
-    # model_mr.freeze()
-
-    # NN_US = getattr(diffusion, args.nn_us)
-    # model_us = NN_US(**vars(args)).load_from_checkpoint(args.model_us)
-    # model_us.eval()
-    # model_us.freeze()
-
-    NN = getattr(diffusion, args.nn)
-    # model = NN(model_mr, model_us, **vars(args))
+    NN = getattr(diffusion, args.nn)    
     model = NN(**vars(args))
 
 
-    train_transform_mr = MRDiffusionTrainTransforms(mount_point=args.mount_point, random_slice_size=args.random_slice_size, probe_fan_prob=1.0)
-    valid_transform_mr = MRDiffusionEvalTransforms(mount_point=args.mount_point, random_slice_size=args.random_slice_size, probe_fan_prob=1.0)
+    train_transform_must = MustTrainTransforms()
+    valid_transform_must = MustEvalTransforms()
 
-    mr_ds_train = MRDatasetVolumes(df_train_mr, mount_point=args.mount_point, img_column='img_path', transform=train_transform_mr)
-    mr_ds_val = MRDatasetVolumes(df_val_mr, mount_point=args.mount_point, img_column='img_path', transform=valid_transform_mr)
+    must_ds_train = USDataset(df_train_must, mount_point=args.mount_point, img_column='img_path', transform=train_transform_must, repeat_channel=False)
+    must_ds_val = USDataset(df_val_must, mount_point=args.mount_point, img_column='img_path', transform=valid_transform_must, repeat_channel=False)
+
+    train_transform_us = RealUSTrainTransforms()
+    valid_transform_us = RealEvalTransforms()
+
+    us_ds_train = USDataset(df_train_us, args.mount_point, img_column='img_path', transform=train_transform_us, repeat_channel=False)
+    us_ds_val = USDataset(df_val_us, args.mount_point, img_column='img_path', transform=valid_transform_us, repeat_channel=False)
+
+    must_us_data = MUSTUSDataModule(must_ds_train, must_ds_val, us_ds_train, us_ds_val, batch_size=args.batch_size, num_workers=args.num_workers)
 
 
-    train_transform_us = DiffusionTrainTransforms()
-    valid_transform_us = DiffusionEvalTransforms()
+    # must_us_data.setup()
 
-    us_ds_train = StackDataset(
-                    USDataset(df_train_us, args.mount_point, img_column='img_path', transform=train_transform_us, repeat_channel=False), 
-                    stack_slices=args.random_slice_size)
-    us_ds_val = StackDataset(
-                    USDataset(df_val_us, args.mount_point, img_column='img_path', transform=valid_transform_us, repeat_channel=False),
-                    stack_slices=args.random_slice_size)
+    # train_ds = must_us_data.train_dataloader()
+    # for idx, batch in enumerate(train_ds):
+    #     must, us = batch
 
-    mr_us_data = MRUSDataModule(mr_ds_train, mr_ds_val, us_ds_train, us_ds_val, batch_size=args.batch_size, num_workers=args.num_workers)
+    #     print("__")
+    #     print(must.shape)
+    #     print(us.shape)
+    #     print("..")
+
+
+    # quit()
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.out,
@@ -93,17 +90,13 @@ def main(args):
     callbacks=[early_stop_callback, checkpoint_callback]
     logger = None
 
-    if args.tb_dir:
-        logger = TensorBoardLogger(save_dir=args.tb_dir, name=args.tb_name)    
-        image_logger = DiffusionImageLoggerMRUS(log_steps=args.log_steps)
-        callbacks.append(image_logger)
-    elif args.neptune_tags:
+    if args.neptune_tags:
         logger = NeptuneLogger(
-            project='ImageMindAnalytics/DiffusionMRUS',
+            project='ImageMindAnalytics/DiffusionMustUS',
             tags=args.neptune_tags,
             api_key=os.environ['NEPTUNE_API_TOKEN']
         )
-        image_logger = DiffusionImageLoggerMRUSNeptune(log_steps=args.log_steps)
+        image_logger = ImageLoggerMustUSNeptune(log_steps=args.log_steps)
         callbacks.append(image_logger)
 
     trainer = Trainer(
@@ -118,7 +111,7 @@ def main(args):
         strategy=DDPStrategy(find_unused_parameters=False)
     )
     
-    trainer.fit(model, datamodule=mr_us_data, ckpt_path=args.model)
+    trainer.fit(model, datamodule=must_us_data, ckpt_path=args.model)
 
 
 if __name__ == '__main__':
@@ -133,8 +126,12 @@ if __name__ == '__main__':
     hparams_group.add_argument('--steps', help='Max number of steps per epoch', type=int, default=-1)    
     hparams_group.add_argument('--batch_size', help='Batch size', type=int, default=2)
     hparams_group.add_argument('--random_slice_size', help='Number of random slice to grab from volumes, affects batch size, i.e., batch_size=random_slice_size*batch_size', type=int, default=10)          
-    hparams_group.add_argument('--perceptual_weight', help='Perceptual weight', type=float, default=0.001)
-    hparams_group.add_argument('--adversarial_weight', help='Adversarial weight', type=float, default=0.01)
+    hparams_group.add_argument('--ommega_a', help='Perceptual weight a', type=float, default=0.001)
+    hparams_group.add_argument('--ommega_b', help='Perceptual weight b', type=float, default=0.001)
+    hparams_group.add_argument('--gamma_a', help='Generator weight a', type=float, default=1.0)
+    hparams_group.add_argument('--gamma_b', help='Generator weight b', type=float, default=1.0)
+    hparams_group.add_argument('--lambda_a', help='Lambda a reconstruction weight', type=float, default=10.0)
+    hparams_group.add_argument('--lambda_b', help='Lambda b reconstruction weight', type=float, default=10.0)
     hparams_group.add_argument('--weight_decay', help='Weight decay for optimizer', type=float, default=0.01)
     hparams_group.add_argument('--kl_weight', help='Weight decay for optimizer', type=float, default=1e-6)    
     hparams_group.add_argument('--autoencoder_warm_up_n_epochs', help='Warmup epochs', type=float, default=10)
@@ -150,8 +147,8 @@ if __name__ == '__main__':
     input_group.add_argument('--model', help='Model to continue training', type=str, default= None)
     input_group.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")    
     input_group.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
-    input_group.add_argument('--csv_train_mr', required=True, type=str, help='Train CSV')
-    input_group.add_argument('--csv_valid_mr', required=True, type=str, help='Valid CSV')    
+    input_group.add_argument('--csv_train_must', required=True, type=str, help='Train CSV')
+    input_group.add_argument('--csv_valid_must', required=True, type=str, help='Valid CSV')    
     input_group.add_argument('--csv_train_us', required=True, type=str, help='Train CSV')
     input_group.add_argument('--csv_valid_us', required=True, type=str, help='Valid CSV')    
 

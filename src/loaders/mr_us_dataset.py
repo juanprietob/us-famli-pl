@@ -13,7 +13,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 
 import pytorch_lightning as pl
-
+import pickle
 
 class ConcatDataset(torch.utils.data.Dataset):
     def __init__(self, *datasets):
@@ -24,6 +24,11 @@ class ConcatDataset(torch.utils.data.Dataset):
 
     def __len__(self):
         return min(len(d) for d in self.datasets)
+
+    def shuffle(self):
+        for d in self.datasets:
+            d.df = d.df.sample(frac=1.0).reset_index(drop=True)
+
 
 class StackDataset(Dataset):
     def __init__(self, dataset, stack_slices=10, shuffle_df=False):        
@@ -57,6 +62,55 @@ class MRDatasetVolumes(Dataset):
         
         img_path = os.path.join(self.mount_point, self.df.iloc[idx][self.img_column])
         return self.transform(img_path)
+
+class VolumeSlicingProbeParamsDataset(Dataset):
+    def __init__(self, volume, df, probe_params_column_name="probe_params_fn", mount_point="./", transform=None, interpolator=sitk.sitkNearestNeighbor):
+                
+        self.volume = volume        
+        self.df = df        
+        self.probe_params_column_name = probe_params_column_name
+        self.mount_point = mount_point
+        self.transform = transform        
+        self.interpolator = interpolator
+        
+
+    def __len__(self):
+        return len(self.df.index)
+
+    def __getitem__(self, idx):
+        
+        probe_params_fn = self.df.iloc[idx][self.probe_params_column_name]        
+        probe_params = self.read_probe_params(probe_params_fn)
+
+        img = self.sample_image(probe_params)
+        img_np = sitk.GetArrayFromImage(img).astype(int)
+        
+        if self.transform:
+            return self.transform(img_np)
+        
+        return img_np
+    
+    def read_probe_params(self, probe_params_fn):
+        return pickle.load(open(os.path.join(self.mount_point, probe_params_fn), 'rb'))
+    
+    def sample_image(self, probe_params, interpolator=sitk.sitkNearestNeighbor):
+        
+        probe_direction = probe_params['probe_direction']
+        ref_size = probe_params['ref_size']
+        ref_origin = probe_params['ref_origin']
+        ref_spacing = probe_params['ref_spacing']
+
+        ref = sitk.Image(int(ref_size[0]), int(ref_size[1]), int(ref_size[2]), sitk.sitkFloat32)
+        ref.SetOrigin(ref_origin)
+        ref.SetSpacing(ref_spacing)
+        ref.SetDirection(probe_direction.flatten().tolist())
+
+        resampler = sitk.ResampleImageFilter()
+        if interpolator:
+            resampler.SetInterpolator(interpolator)
+        resampler.SetReferenceImage(ref)
+
+        return resampler.Execute(self.volume)
 
 class MRDataModuleVolumes(pl.LightningDataModule):
     def __init__(self, df_train, df_val, df_test, mount_point="./", batch_size=32, num_workers=4, img_column='img_path', ga_column='ga_boe', id_column='study_id', train_transform=None, valid_transform=None, test_transform=None, drop_last=False):
@@ -129,3 +183,29 @@ class MRUSDataModule(pl.LightningDataModule):
         mr_batch = torch.cat(mr_batch, axis=1).permute(dims=(1,0,2,3))
         us_batch = torch.cat(us_batch, axis=1).permute(dims=(1,0,2,3))        
         return mr_batch[torch.randperm(mr_batch.shape[0])], us_batch
+
+class MUSTUSDataModule(pl.LightningDataModule):
+    def __init__(self, must_dataset_train, must_dataset_val, us_dataset_train, us_dataset_val, batch_size=8, num_workers=4):
+        super().__init__()
+
+        self.must_dataset_train = must_dataset_train
+        self.us_dataset_train = us_dataset_train
+
+        self.must_dataset_val = must_dataset_val
+        self.us_dataset_val = us_dataset_val
+        
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage=None):
+
+        # Assign train/val datasets for use in dataloaders        
+        self.train_ds = ConcatDataset(self.must_dataset_train, self.us_dataset_train)
+        self.val_ds = ConcatDataset(self.must_dataset_val, self.us_dataset_val)
+
+    def train_dataloader(self):
+        self.train_ds.shuffle()
+        return DataLoader(self.train_ds, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True, shuffle=True)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.batch_size, num_workers=self.num_workers, pin_memory=True)    

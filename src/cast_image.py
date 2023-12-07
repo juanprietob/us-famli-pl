@@ -10,6 +10,7 @@ def main(args):
     if (args.squeeze):
         img_np = img_np.squeeze()
     
+    print(img_np.shape)
     out_img = sitk.GetImageFromArray(img_np)
     out_img.SetSpacing(img.GetSpacing())
     out_img.SetOrigin(img.GetOrigin())
