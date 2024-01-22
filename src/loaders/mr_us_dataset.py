@@ -20,6 +20,9 @@ class ConcatDataset(torch.utils.data.Dataset):
         self.datasets = datasets
 
     def __getitem__(self, i):
+        # print(f"Fetching index: {i}") #debug
+        # for d in self.datasets:
+            # print(f"Dataset length: {len(d)}") #debug
         return tuple(d[i] for d in self.datasets)
 
     def __len__(self):
@@ -84,16 +87,19 @@ class VolumeSlicingProbeParamsDataset(Dataset):
 
         img = self.sample_image(probe_params)
         img_np = sitk.GetArrayFromImage(img).astype(int)
+        print(f"Image shape before transform: {img_np.shape}") #debug
         
         if self.transform:
-            return self.transform(img_np)
+            transformed_img = self.transform(img_np)
+            print(f"Image shape after transform: {transformed_img.shape}") #debug
+            return transformed_img
         
         return img_np
     
     def read_probe_params(self, probe_params_fn):
         return pickle.load(open(os.path.join(self.mount_point, probe_params_fn), 'rb'))
     
-    def sample_image(self, probe_params, interpolator=sitk.sitkNearestNeighbor):
+    def sample_image(self, probe_params, interpolator=sitk.sitkNearestNeighbor, identity_direction=True):
         
         probe_direction = probe_params['probe_direction']
         ref_size = probe_params['ref_size']
@@ -110,7 +116,14 @@ class VolumeSlicingProbeParamsDataset(Dataset):
             resampler.SetInterpolator(interpolator)
         resampler.SetReferenceImage(ref)
 
-        return resampler.Execute(self.volume)
+        sample = resampler.Execute(self.volume)
+        if identity_direction:
+            sample_np = sitk.GetArrayFromImage(sample).squeeze()
+            sample_np = np.flip(np.rot90(sample_np, k=1, axes=(0, 1)), axis=0)
+            sample = sitk.GetImageFromArray(sample_np)
+            sample.SetSpacing(ref_spacing)
+        return sample
+
 
 class MRDataModuleVolumes(pl.LightningDataModule):
     def __init__(self, df_train, df_val, df_test, mount_point="./", batch_size=32, num_workers=4, img_column='img_path', ga_column='ga_boe', id_column='study_id', train_transform=None, valid_transform=None, test_transform=None, drop_last=False):
@@ -149,6 +162,7 @@ class MRDataModuleVolumes(pl.LightningDataModule):
 
     def arrange_slices(self, batch):
         batch = torch.cat(batch, axis=1).permute(dims=(1,0,2,3))
+        print(f"Batch shape after concatenation and permutation: {batch.shape}") #debug
         idx = torch.randperm(batch.shape[0])
         return batch[idx]
 

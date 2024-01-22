@@ -8,8 +8,8 @@ import numpy as np
 import torch
 from torch.distributed import is_initialized, get_rank
 
-from loaders.ultrasound_dataset import USDataModule, SimuDataModule
-from transforms.ultrasound_transforms import DiffusionEvalTransforms, DiffusionTrainTransforms, DiffusionTrainTransformsPaired, DiffusionEvalTransformsPaired
+from loaders.ultrasound_dataset import USDataModule, SimuDataModule, USDataModuleV2
+from transforms.ultrasound_transforms import DiffusionV2EvalTransforms, DiffusionV2TrainTransforms, DiffusionEvalTransforms, DiffusionTrainTransforms, DiffusionTrainTransformsPaired, DiffusionEvalTransformsPaired
 from callbacks.logger import DiffusionImageLogger, DiffusionImageLoggerNeptune, DiffusionImageLoggerPairedNeptune
 
 from nets import diffusion
@@ -40,18 +40,23 @@ def main(args):
     model = NN(**vars(args))
 
 
-    train_transform = DiffusionTrainTransforms()
-    valid_transform = DiffusionEvalTransforms()
+    # train_transform = DiffusionTrainTransforms()
+    # valid_transform = DiffusionEvalTransforms()
 
-    if args.target_column:
+    # if args.target_column:
         
-        train_transform = DiffusionTrainTransformsPaired()
-        valid_transform = DiffusionEvalTransformsPaired()
+    #     train_transform = DiffusionTrainTransformsPaired()
+    #     valid_transform = DiffusionEvalTransformsPaired()
 
-        usdata = SimuDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False, target_column=args.target_column)
-    else:
+    #     usdata = SimuDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False, target_column=args.target_column)
+    # else:
 
-        usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False)
+    #     usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False)
+
+    train_transform = DiffusionV2TrainTransforms()
+    valid_transform = DiffusionV2EvalTransforms()
+
+    usdata = USDataModuleV2(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform)
 
     
 
@@ -65,9 +70,12 @@ def main(args):
 
     early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=args.patience, verbose=True, mode="min")
 
+    callbacks = [early_stop_callback, checkpoint_callback]
+    logger = None
     if args.tb_dir:
         logger = TensorBoardLogger(save_dir=args.tb_dir, name=args.tb_name)  
         image_logger = DiffusionImageLogger(num_images=args.num_images)  
+        callbacks.append(image_logger)
 
     elif args.neptune_tags:
         logger = NeptuneLogger(
@@ -79,16 +87,17 @@ def main(args):
             image_logger = DiffusionImageLoggerPairedNeptune(num_images=args.num_images)
         else:
             image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images)
+        callbacks.append(image_logger)
 
     trainer = Trainer(
         logger=logger,
         max_epochs=args.epochs,
         max_steps=args.steps,
-        callbacks=[early_stop_callback, checkpoint_callback, image_logger],
+        callbacks=callbacks,
         accelerator='gpu', 
         devices=torch.cuda.device_count(),
         # plugins=[MixedPrecisionPlugin(precision='16-mixed', device='cuda')],
-        strategy=DDPStrategy(find_unused_parameters=False)
+        strategy=DDPStrategy(find_unused_parameters=True)
     )
     
     trainer.fit(model, datamodule=usdata, ckpt_path=args.model)
@@ -112,6 +121,8 @@ if __name__ == '__main__':
     hparams_group.add_argument('--autoencoder_warm_up_n_epochs', help='Warmup epochs', type=float, default=10)        
     hparams_group.add_argument('--num_train_timesteps', help='Num train steps for ddpml', type=int, default=1000)
     hparams_group.add_argument('--latent_channels', help='Latent Channels', type=int, default=3)    
+    hparams_group.add_argument('--denoise', help='Use noise transform during training', type=int, default=1)    
+    hparams_group.add_argument('--smooth', help='Use smooth transform during training', type=int, default=1)    
 
     input_group = parser.add_argument_group('Input')
     input_group.add_argument('--nn', help='Type of neural network', type=str, default="AutoEncoderKL")

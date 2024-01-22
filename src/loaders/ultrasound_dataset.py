@@ -13,6 +13,9 @@ from torch.nn.utils.rnn import pad_sequence
 
 import pytorch_lightning as pl
 
+from monai.transforms import (    
+    LoadImage
+)
 
 class USDataset(Dataset):
     def __init__(self, df, mount_point = "./", transform=None, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, repeat_channel=True, return_head=False):
@@ -49,6 +52,55 @@ class USDataset(Dataset):
                     img = torch.permute(img, [2, 0, 1])[0:3, :, :]
                 else:                    
                     img = img.unsqueeze(0).repeat(3,1,1)            
+        except:
+            print("Error reading frame:" + img_path, file=sys.stderr)
+            img = torch.tensor(np.zeros([3, 256, 256]), dtype=torch.float32)
+
+        if(self.transform):
+            img = self.transform(img)
+
+        if self.class_column:
+            return img, torch.tensor(self.df.iloc[idx][self.class_column]).to(torch.long)
+
+        if self.ga_column:
+            ga = self.df.iloc[idx][self.ga_column]
+            return img, torch.tensor([ga])
+
+        if self.scalar_column:
+            scalar = self.df.iloc[idx][self.scalar_column]
+            return img, torch.tensor(scalar)            
+        if self.return_head:
+            return img, head
+
+        return img
+
+class USDatasetV2(Dataset):
+    def __init__(self, df, mount_point = "./", transform=None, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, return_head=False):
+        self.df = df
+        self.mount_point = mount_point
+        self.transform = transform
+        self.img_column = img_column
+        self.class_column = class_column
+        self.ga_column = ga_column
+        self.scalar_column = scalar_column
+        self.return_head = return_head
+        self.loader = LoadImage(ensure_channel_first=True, reverse_indexing=False)
+
+    def __len__(self):
+        return len(self.df.index)
+
+    def __getitem__(self, idx):
+        
+        img_path = os.path.join(self.mount_point, self.df.iloc[idx][self.img_column])
+        
+        try:
+            # img, head = nrrd.read(img_path, index_order="C")
+            # img = img.astype(float)            
+            # img = torch.tensor(img, dtype=torch.float32).detach()        
+            # img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))
+            # img = torch.tensor(img, dtype=torch.float32)
+            img = self.loader(img_path)[0]
+            img = torch.permute(img, (0, 2, 1))
         except:
             print("Error reading frame:" + img_path, file=sys.stderr)
             img = torch.tensor(np.zeros([3, 256, 256]), dtype=torch.float32)
@@ -386,9 +438,9 @@ class USDataModule(pl.LightningDataModule):
     def setup(self, stage=None):
 
         # Assign train/val datasets for use in dataloaders
-        self.train_ds = USDataset(self.df_train, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.train_transform, repeat_channel=self.repeat_channel, target_column=self.target_column)
-        self.val_ds = USDataset(self.df_val, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.valid_transform, repeat_channel=self.repeat_channel, target_column=self.target_column)
-        self.test_ds = USDataset(self.df_test, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.test_transform, repeat_channel=self.repeat_channel, target_column=self.target_column)
+        self.train_ds = USDataset(self.df_train, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.train_transform, repeat_channel=self.repeat_channel)
+        self.val_ds = USDataset(self.df_val, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.valid_transform, repeat_channel=self.repeat_channel)
+        self.test_ds = USDataset(self.df_test, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.test_transform, repeat_channel=self.repeat_channel)
 
     def train_dataloader(self):
         return DataLoader(self.train_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last, shuffle=True, prefetch_factor=2)
@@ -398,7 +450,43 @@ class USDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last)
-    
+
+class USDataModuleV2(pl.LightningDataModule):
+    def __init__(self, df_train, df_val, df_test, mount_point="./", batch_size=256, num_workers=4, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, train_transform=None, valid_transform=None, test_transform=None, drop_last=False, target_column=None):
+        super().__init__()
+
+        self.df_train = df_train
+        self.df_val = df_val
+        self.df_test = df_test
+        self.mount_point = mount_point
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.img_column = img_column
+        self.class_column = class_column
+        self.scalar_column = scalar_column
+        self.ga_column = ga_column
+        self.train_transform = train_transform
+        self.valid_transform = valid_transform
+        self.test_transform = test_transform
+        self.drop_last=drop_last    
+        self.target_column = target_column
+
+    def setup(self, stage=None):
+
+        # Assign train/val datasets for use in dataloaders
+        self.train_ds = USDatasetV2(self.df_train, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.train_transform)
+        self.val_ds = USDatasetV2(self.df_val, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.valid_transform)
+        self.test_ds = USDatasetV2(self.df_test, self.mount_point, img_column=self.img_column, class_column=self.class_column, ga_column=self.ga_column, scalar_column=self.scalar_column, transform=self.test_transform)
+
+    def train_dataloader(self):
+        return DataLoader(self.train_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last, shuffle=True, prefetch_factor=2)
+
+    def val_dataloader(self):
+        return DataLoader(self.val_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last)
+
+    def test_dataloader(self):
+        return DataLoader(self.test_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last)
+
 
 class SimuDataModule(pl.LightningDataModule):
     def __init__(self, df_train, df_val, df_test, mount_point="./", batch_size=256, num_workers=4, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, train_transform=None, valid_transform=None, test_transform=None, drop_last=False, repeat_channel=True, target_column=None):

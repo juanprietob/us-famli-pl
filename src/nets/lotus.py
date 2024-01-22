@@ -59,8 +59,9 @@ class UltrasoundRendering(pl.LightningModule):
         self.mu_0_dict =           torch.nn.Parameter(torch.rand(self.hparams.num_labels)) # mu_0 - scattering_mu   mean brightness
         self.mu_1_dict =           torch.nn.Parameter(torch.rand(self.hparams.num_labels)) # mu_1 - scattering density, Nr of scatterers/voxel
         self.sigma_0_dict =        torch.nn.Parameter(torch.rand(self.hparams.num_labels)) # sigma_0 - scattering_sigma - brightness std
-        g_kernel = torch.tensor(self.gaussian_kernel(3, 0., 0.5)[None, None, :, :])
-
+        g_kernel = self.gaussian_kernel(3, 0., 0.5)
+        g_kernel = g_kernel[None, None, :, :]  # Add two singleton dimensions to match shape [1, 1, kernel_height, kernel_width]
+        g_kernel = g_kernel.repeat(1, 16, 1, 1)  # Repeat the kernel across the channel dimension
         self.register_buffer("g_kernel", g_kernel)
 
         self.resize_t = T.Resize((256, 256))
@@ -98,14 +99,14 @@ class UltrasoundRendering(pl.LightningModule):
         dists = torch.cat([dists, dists[:, -1, None]], dim=-1)                # dists.shape=(W, H)
 
         attenuation = torch.exp(-attenuation_medium_map * dists)
-        attenuation_total = torch.cumprod(attenuation, dim=3, dtype=torch.float32, out=None)
+        attenuation_total = torch.cumprod(attenuation, dim=2, dtype=torch.float32, out=None)
 
-        gain_coeffs = torch.linspace(1, self.hparams.tgc, attenuation_total.shape[3], device=self.device)
+        gain_coeffs = torch.linspace(1, self.hparams.tgc, attenuation_total.shape[2], device=self.device)
         gain_coeffs = torch.tile(gain_coeffs, (attenuation_total.shape[2], 1))
         gain_coeffs = torch.tensor(gain_coeffs)
         attenuation_total = attenuation_total * gain_coeffs     # apply TGC
 
-        reflection_total = torch.cumprod(1. - refl_map * boundary_map, dim=3, dtype=torch.float32, out=None) 
+        reflection_total = torch.cumprod(1. - refl_map * boundary_map, dim=2, dtype=torch.float32, out=None) 
         reflection_total = reflection_total.squeeze(-1) 
         reflection_total_plot = torch.log(reflection_total + torch.finfo(torch.float32).eps)
 
@@ -147,7 +148,7 @@ class UltrasoundRendering(pl.LightningModule):
         return z_vals
 
     # warp the linear US image to approximate US image from curvilinear US probe 
-    def warp_img(self, inputImage):
+    def warp_img_curved_array(self, inputImage):
         resultWidth = 360
         resultHeight = 220
         centerX = resultWidth / 2
@@ -201,12 +202,60 @@ class UltrasoundRendering(pl.LightningModule):
         resultImage_resized = self.resize_t(resultImage)
 
         return resultImage_resized
+    
+    
+    def warp_img_vector(self, inputImage):
+        print("Shape of inputImage before accessing dimensions:", inputImage.shape)#debug
+        
+        if len(inputImage.shape) == 3:
+            inputImage = inputImage.unsqueeze(1)
+            print("Shape of inputImage after unsqueeze(1)", inputImage.shape)#debug
+            
+        resultWidth = 360
+        resultHeight = 220
+        h, w = inputImage.shape[2], inputImage.shape[3]
+
+        # Create linearly spaced grid for trapezoidal transformation
+        x_top = torch.linspace(-1, 1, resultWidth, device=self.device)
+        x_bottom = torch.linspace(-1.5, 1.5, resultWidth, device=self.device)
+
+        # Interpolating between x_top and x_bottom for each row
+        x = torch.stack([torch.lerp(x_top, x_bottom, t) for t in torch.linspace(0, 1, resultHeight, device=self.device)])
+        x = x.view(-1)
+
+        y = torch.linspace(-1, 1, resultHeight, device=self.device)
+
+        # Create meshgrid
+        yy, xx = torch.meshgrid(y, x, indexing='ij')
+
+        # Scale to be in the range of [-1, 1]
+        xx = 2 * xx / (w - 1) - 1
+        yy = 2 * yy / (h - 1) - 1
+
+        # Reshape input image
+        inputImage = inputImage.float()
+        inputImage = torch.transpose(inputImage, 2, 3)
+        print('shape input image :', inputImage.shape)#debug
+
+        # Interpolate using grid_sample
+        grid = torch.stack([xx, yy], dim=-1).repeat(inputImage.shape[0], 1, 1, 1).to(self.device)
+        
+        resultImage = F.grid_sample(inputImage, grid, mode='bilinear', align_corners=True)
+
+        # Resize if needed
+        resultImage_resized = self.resize_t(resultImage)
+        print('shape resultImage :', resultImage_resized.shape)#debug
+
+        return resultImage_resized
 
 
     def forward(self, x):
         #init tissue maps
         #generate maps from the dictionary and the input label map
-        x = torch.rot90(x, k=1, dims=[2, 3])
+        print('x shape : ',x.shape)
+        
+        x = torch.rot90(x, k=1, dims=[1, 2])
+        
         acoustic_imped_map = self.acoustic_impedance_dict[x]
         attenuation_medium_map = self.attenuation_dict[x]
         mu_0_map = self.mu_0_dict[x]
@@ -218,7 +267,7 @@ class UltrasoundRendering(pl.LightningModule):
         diff_arr = torch.diff(acoustic_imped_map, dim=2)                
         # The pad tuple is (padding_left,padding_right, padding_top,padding_bottom)
         # The array is padded at the top
-        diff_arr = F.pad(diff_arr, (0,0,1,0))
+        diff_arr = F.pad(diff_arr, (0,1,0,0))
 
         #Compute the boundary map using the diff_array
         boundary_map =  -torch.exp(-(diff_arr**2)/self.hparams.alpha_coeff_boundary_map) + 1
@@ -230,12 +279,20 @@ class UltrasoundRendering(pl.LightningModule):
         # This computes the sum/accumulation along the direction and set elements that are 0 to 1. Compute the division
         sum_arr = acoustic_imped_map + shifted_arr
         sum_arr[sum_arr == 0] = 1
+        sum_arr = sum_arr[:, :, :-1]
+        sum_arr = F.pad(sum_arr, (0, 1, 0, 0, 0, 0))
+        
+        print("diff_arr shape:", diff_arr.shape)
+        print("sum_arr shape:", sum_arr.shape)
+        
         div = diff_arr / sum_arr
         # Compute the reflection from the elements
         refl_map = div ** 2
         refl_map = torch.sigmoid(refl_map)      # 1 / (1 + (-refl_map).exp())
 
-        z_vals = self.render_rays(x.shape[2], x.shape[3])
+        z_vals = self.render_rays(x.shape[1], x.shape[2])
+        print('z_vals : ', z_vals.shape)
+        print('x : ', x.shape)
 
         if self.hparams.clamp_vals:
             attenuation_medium_map = torch.clamp(attenuation_medium_map, 0, 10)
@@ -249,7 +306,7 @@ class UltrasoundRendering(pl.LightningModule):
         intensity_map  = ret_list[0]
        
         # return intensity_map
-        intensity_map_masked = self.warp_img(intensity_map)        
+        intensity_map_masked = self.warp_img_vector(intensity_map)
         intensity_map_masked = torch.rot90(intensity_map_masked, k=3, dims=[2, 3])
         
         return intensity_map_masked,  attenuation_medium_map, mu_0_map, mu_1_map, sigma_0_map, acoustic_imped_map, boundary_map, shifted_arr, intensity_map

@@ -14,9 +14,9 @@ from generative.losses.adversarial_loss import PatchAdversarialLoss
 from generative.losses.perceptual import PerceptualLoss
 from generative.networks import nets
 from generative.networks.schedulers import DDPMScheduler, DDIMScheduler
-from generative.inferers import LatentDiffusionInferer
-from generative.inferers import DiffusionInferer
+from generative.inferers import LatentDiffusionInferer, DiffusionInferer
 
+import monai
 from monai import transforms
 
 class GaussianNoise(nn.Module):    
@@ -63,13 +63,33 @@ class AutoEncoderKL(pl.LightningModule):
             spatial_dims=2,
             in_channels=1,
             out_channels=1,
-            num_channels=(128, 128, 256, 512),
+            num_channels=(128, 256, 384),
             latent_channels=latent_channels,
-            num_res_blocks=2,
-            attention_levels=(False, False, False, False),
-            with_encoder_nonlocal_attn=False,
-            with_decoder_nonlocal_attn=False,
+            num_res_blocks=1,
+            norm_num_groups=32,
+            attention_levels=(False, False, True),
         )
+
+        # self.autoencoderkl = nets.AutoencoderKL(
+        #     spatial_dims=2,
+        #     in_channels=1,
+        #     out_channels=1,
+        #     num_channels=(128, 128, 256, 512),
+        #     latent_channels=latent_channels,
+        #     num_res_blocks=2,
+        #     attention_levels=(False, False, False, False),
+        #     with_encoder_nonlocal_attn=False,
+        #     with_decoder_nonlocal_attn=False,
+        # )
+
+        # self.autoencoderkl = nets.AutoencoderKL(spatial_dims=2,
+        #     in_channels=1,
+        #     out_channels=1,
+        #     num_channels=(128, 256, 512, 512),
+        #     latent_channels=latent_channels,
+        #     num_res_blocks=2,
+        #     norm_num_groups=32,
+        #     attention_levels=(False, False, False, True))
 
         self.perceptual_loss = PerceptualLoss(spatial_dims=2, network_type="alex")
 
@@ -83,12 +103,20 @@ class AutoEncoderKL(pl.LightningModule):
         # self.scaler_g = GradScaler()
         # self.scaler_d = GradScaler()
 
-        self.noise_transform = torch.nn.Sequential(
-            GaussianNoise(0.0, 0.05),
-            RandCoarseShuffle(),
-            SaltAndPepper()
-            
-        )
+        if hasattr(self.hparams, "denoise") and self.hparams.denoise: 
+            self.noise_transform = torch.nn.Sequential(
+                GaussianNoise(0.0, 0.05),
+                RandCoarseShuffle(),
+                SaltAndPepper()
+            )
+        else:
+            self.noise_transform = nn.Identity()
+
+        if hasattr(self.hparams, "smooth") and self.hparams.smooth: 
+            self.smooth_transform = transforms.RandSimulateLowResolution(prob=1.0, zoom_range=(0.15, 0.3))
+        else:
+            self.smooth_transform = nn.Identity()
+        
         
 
     def configure_optimizers(self):
@@ -101,34 +129,8 @@ class AutoEncoderKL(pl.LightningModule):
                                 weight_decay=self.hparams.weight_decay)
 
         return [optimizer_g, optimizer_d]
-
-    def training_step(self, train_batch, batch_idx):
-        x = train_batch
-
-        optimizer_g, optimizer_d = self.optimizers()
-        
-        optimizer_g.zero_grad()
-
-        # with autocast(enabled=True):
-        #     reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
-
-        #     recons_loss = F.l1_loss(reconstruction.float(), x.float())
-        #     p_loss = self.perceptual_loss(reconstruction.float(), x.float())
-        #     kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3])
-        #     kl_loss = torch.sum(kl_loss) / kl_loss.shape[0]
-        #     loss_g = recons_loss + (self.hparams.kl_weight * kl_loss) + (self.hparams.perceptual_weight * p_loss)
-
-        #     if self.trainer.current_epoch > self.hparams.autoencoder_warm_up_n_epochs:
-        #         logits_fake = self.discriminator(reconstruction.contiguous().float())[-1]
-        #         generator_loss = self.adversarial_loss(logits_fake, target_is_real=True, for_discriminator=False)
-        #         loss_g += self.hparams.adversarial_weight * generator_loss
-
-        # self.scaler_g.scale(loss_g).backward()
-        # self.scaler_g.step(optimizer_g)
-        # self.scaler_g.update()
-
-        reconstruction, z_mu, z_sigma = self.autoencoderkl(self.noise_transform(x))
-
+    
+    def compute_loss_generator(self, x, reconstruction, z_mu, z_sigma):
         recons_loss = F.l1_loss(reconstruction.float(), x.float())
         p_loss = self.perceptual_loss(reconstruction.float(), x.float())
         kl_loss = 0.5 * torch.sum(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1, dim=[1, 2, 3])
@@ -137,43 +139,43 @@ class AutoEncoderKL(pl.LightningModule):
 
         if self.trainer.current_epoch > self.hparams.autoencoder_warm_up_n_epochs:
             logits_fake = self.discriminator(reconstruction.contiguous().float())[-1]
-            generator_loss = self.adversarial_loss(logits_fake, target_is_real=True, for_discriminator=False)
-            loss_g += self.hparams.adversarial_weight * generator_loss
+            generator_adv_loss = self.adversarial_loss(logits_fake, target_is_real=True, for_discriminator=False)
+            loss_g += self.hparams.adversarial_weight * generator_adv_loss
 
-        loss_g.backward()
+        return loss_g, recons_loss
+    
+    def compute_loss_discriminator(self, x, reconstruction):
+        logits_fake = self.discriminator(reconstruction.contiguous().detach())[-1]
+        loss_d_fake = self.adversarial_loss(logits_fake, target_is_real=False, for_discriminator=True)
+        logits_real = self.discriminator(x.contiguous().detach())[-1]
+        loss_d_real = self.adversarial_loss(logits_real, target_is_real=True, for_discriminator=True)
+        return (loss_d_fake + loss_d_real) * 0.5
+
+
+    def training_step(self, train_batch, batch_idx):
+        x = train_batch
+
+        optimizer_g, optimizer_d = self.optimizers()
+
+        reconstruction, z_mu, z_sigma = self.autoencoderkl(self.smooth_transform(self.noise_transform(x)))
+
+        loss_g, recons_loss = self.compute_loss_generator(x, reconstruction, z_mu, z_sigma)
+
+        optimizer_g.zero_grad()
+        self.manual_backward(loss_g)
         optimizer_g.step()
+        self.untoggle_optimizer(optimizer_g)
         
-        loss_d = 0
+        loss_d = 0.0
         if self.trainer.current_epoch > self.hparams.autoencoder_warm_up_n_epochs:
+            loss_d = self.compute_loss_discriminator(x, reconstruction)
 
-            # with autocast(enabled=True):
-            #     optimizer_d.zero_grad()
-
-            #     logits_fake = self.discriminator(reconstruction.contiguous().detach())[-1]
-            #     loss_d_fake = self.adversarial_loss(logits_fake, target_is_real=False, for_discriminator=True)
-            #     logits_real = self.discriminator(x.contiguous().detach())[-1]
-            #     loss_d_real = self.adv_loss(logits_real, target_is_real=True, for_discriminator=True)
-            #     discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
-
-            #     loss_d = self.hparams.adversarial_weight * discriminator_loss
-
-            # self.scaler_d.scale(loss_d).backward()
-            # self.scaler_d.step(optimizer_d)
-            # self.scaler_d.update()
-            
             optimizer_d.zero_grad()
-
-            logits_fake = self.discriminator(reconstruction.contiguous().detach())[-1]
-            loss_d_fake = self.adversarial_loss(logits_fake, target_is_real=False, for_discriminator=True)
-            logits_real = self.discriminator(x.contiguous().detach())[-1]
-            loss_d_real = self.adversarial_loss(logits_real, target_is_real=True, for_discriminator=True)
-            discriminator_loss = (loss_d_fake + loss_d_real) * 0.5
-
-            loss_d = self.hparams.adversarial_weight * discriminator_loss
-
-            loss_d.backward()
+            self.manual_backward(loss_d)
             optimizer_d.step()
+            self.untoggle_optimizer(optimizer_d)
 
+        self.log("train_loss_recons", recons_loss)
         self.log("train_loss_g", loss_g)
         self.log("train_loss_d", loss_d)
 
@@ -183,17 +185,10 @@ class AutoEncoderKL(pl.LightningModule):
     def validation_step(self, val_batch, batch_idx):
         x = val_batch
 
-        # with autocast(enabled=True):
-        #     reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
-        #     recon_loss = F.l1_loss(x.float(), reconstruction.float())
-
         reconstruction, z_mu, z_sigma = self.autoencoderkl(x)
         recon_loss = F.l1_loss(x.float(), reconstruction.float())
 
         self.log("val_loss", recon_loss, sync_dist=True)
-
-        
-
 
     def forward(self, images):        
         return self.autoencoderkl(images)
@@ -985,13 +980,14 @@ class ResnetBlock(nn.Module):
         """Forward function (with skip connections)"""
         out = x + self.conv_block(x)  # add skip connections
         return out
+    
+
 class CycleGAN(pl.LightningModule):
     def __init__(self, **kwargs):
         super().__init__()
         self.save_hyperparameters()
 
         self.generator_a = ResnetGenerator(input_nc=1, output_nc=1)
-
         self.generator_b = ResnetGenerator(input_nc=1, output_nc=1)
 
         self.discriminator_a = nets.PatchDiscriminator(spatial_dims=2, num_layers_d=3, num_channels=64, in_channels=1, out_channels=1)        
@@ -1037,29 +1033,25 @@ class CycleGAN(pl.LightningModule):
                     param.requires_grad = requires_grad
 
 
-    def compute_loss_g(self, real_a, fake_b, reconstruction_a, real_b, fake_a, reconstruction_b):
+    def compute_loss_g(self, real_a, fake_a, reconstruction_a, real_b, fake_b, reconstruction_b):
         """Calculate the loss for generators G_A and G_B"""
-        # lambda_idt = self.opt.lambda_identity
-        # lambda_A = self.opt.lambda_A
-        # lambda_B = self.opt.lambda_B
-        # # Identity loss
-        # if lambda_idt > 0:
-        #     # G_A should be identity if real_B is fed: ||G_A(B) - B||
-        #     self.idt_A = self.netG_A(self.real_B)
-        #     self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
-        #     # G_B should be identity if real_A is fed: ||G_B(A) - A||
-        #     self.idt_B = self.netG_B(self.real_A)
-        #     self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
-        # else:
-        #     self.loss_idt_A = 0
-        #     self.loss_idt_B = 0
+        loss_idt = 0
+        # Identity loss
+        if self.hparams.lambda_idt > 0:
+            idt_a = self.generator_a(real_a)
+            loss_idt_a = self.idt_loss(real_a, idt_a)
+            
+            idt_b = self.generator_b(self.real_b)
+            loss_idt_b = self.idt_loss(real_b, idt_b)
+
+            loss_idt = (loss_idt_a + loss_idt_b)*self.hparams.lambda_idt
 
         # GAN loss D_A(G_A(A))
-        logits_fake_b = self.discriminator_a(fake_b.contiguous().float())[-1]
-        loss_generator_a = self.adv_loss(logits_fake_b, target_is_real=True, for_discriminator=False) * self.hparams.gamma_a
+        logits_fake_a = self.discriminator_a(fake_a.contiguous().float())[-1]
+        loss_generator_a = self.adv_loss(logits_fake_a, target_is_real=True, for_discriminator=False) * self.hparams.gamma_a
         # GAN loss D_B(G_B(B))        
-        logits_fake_a = self.discriminator_b(fake_a.contiguous().float())[-1]
-        loss_generator_b = self.adv_loss(logits_fake_a, target_is_real=True, for_discriminator=False)  * self.hparams.gamma_b
+        logits_fake_b = self.discriminator_b(fake_b.contiguous().float())[-1]
+        loss_generator_b = self.adv_loss(logits_fake_b, target_is_real=True, for_discriminator=False)  * self.hparams.gamma_b
         
         # Forward cycle loss || G_B(G_A(A)) - A||
         loss_cycle_a = self.cycle_loss(reconstruction_a, real_a) * self.hparams.lambda_a
@@ -1070,7 +1062,7 @@ class CycleGAN(pl.LightningModule):
         perceptual_loss_a = self.perceptual_loss(fake_a.float(), real_a.float()) * self.hparams.ommega_a
         perceptual_loss_b = self.perceptual_loss(fake_b.float(), real_b.float()) * self.hparams.ommega_b
 
-        return loss_generator_a + loss_generator_b + loss_cycle_a + loss_cycle_b + perceptual_loss_a + perceptual_loss_b
+        return loss_generator_a + loss_generator_b + loss_cycle_a + loss_cycle_b + perceptual_loss_a + perceptual_loss_b + loss_idt
 
     def compute_loss_d(self, discriminator, real, fake):
         """Calculate GAN loss for the discriminator
@@ -1098,27 +1090,26 @@ class CycleGAN(pl.LightningModule):
         optimizer_g, optimizer_d = self.optimizers()
 
         # forward        
-        fake_b = self.generator_a(real_a)  # G_A(A)
-        reconstruction_a = self.generator_b(fake_b)   # G_B(G_A(A))
+        fake_b = self.generator_b(real_a)  # G_A(A)
+        reconstruction_a = self.generator_a(fake_b.clone().detach())   # G_B(G_A(A))
         
-        fake_a = self.generator_b(real_b)  # G_B(B)
-        reconstruction_b = self.generator_a(fake_a)   # G_A(G_B(B))
+        fake_a = self.generator_a(real_b)  # G_B(B)
+        reconstruction_b = self.generator_b(fake_a.clone().detach())   # G_A(G_B(B))
 
         # Optimize generator
         self.set_requires_grad([self.discriminator_a, self.discriminator_b], requires_grad=False)
+
         optimizer_g.zero_grad()        
-        loss_g = self.compute_loss_g(real_a, fake_b, reconstruction_a, real_b, fake_a, reconstruction_b)
-        
+        loss_g = self.compute_loss_g(real_a, fake_a, reconstruction_a, real_b, fake_b, reconstruction_b)
         loss_g.backward()
         optimizer_g.step()
-
       
         # D_A and D_B
         self.set_requires_grad([self.discriminator_a, self.discriminator_b], requires_grad=True)
         optimizer_d.zero_grad()   # set D_A and D_B's gradients to zero
-        loss_d_a = self.compute_loss_d(self.discriminator_b, real_a, fake_a)      # calculate gradients for D_b
+        loss_d_a = self.compute_loss_d(self.discriminator_a, real_a, fake_a)      # calculate gradients for D_b
         loss_d_a.backward()
-        loss_d_b = self.compute_loss_d(self.discriminator_a, real_b, fake_b)      # calculate gradients for D_a
+        loss_d_b = self.compute_loss_d(self.discriminator_b, real_b, fake_b)      # calculate gradients for D_a
         loss_d_b.backward()
         optimizer_d.step()  # update D_A and D_B's weights
 
@@ -1134,16 +1125,15 @@ class CycleGAN(pl.LightningModule):
         real_a, real_b = val_batch
 
         # forward        
-        fake_b = self.generator_a(real_a)  # G_A(A)
-        reconstruction_a = self.generator_b(fake_b)   # G_B(G_A(A))
+        fake_b = self.generator_b(real_a)  # G_A(A)
+        reconstruction_a = self.generator_a(fake_b)   # G_B(G_A(A))
         
-        fake_a = self.generator_b(real_b)  # G_B(B)
-        reconstruction_b = self.generator_a(fake_a)   # G_A(G_B(B))
+        fake_a = self.generator_a(real_b)  # G_B(B)
+        reconstruction_b = self.generator_b(fake_a)   # G_A(G_B(B))
 
-        loss_g = self.compute_loss_g(real_a, fake_b, reconstruction_a, real_b, fake_a, reconstruction_b)
+        loss_g = self.compute_loss_g(real_a, fake_a, reconstruction_a, real_b, fake_b, reconstruction_b)
 
         self.log("val_loss", loss_g, sync_dist=True)
-        # self.log("val_loss_quantization", quantization_loss, sync_dist=True)
 
 class CycleAutoEncoderKLV2(pl.LightningModule):
     def __init__(self, **kwargs):
@@ -1943,3 +1933,236 @@ class DDPMPL64_ddim(pl.LightningModule):
         self.scheduler.set_timesteps(num_inference_steps=self.hparams.num_train_timesteps)        
 
         return self.inferer.sample(input_noise=noise, diffusion_model=self.model, scheduler=self.scheduler, verbose=False)
+
+
+class ProjectionHead(nn.Module):
+    def __init__(self, input_dim=1280, hidden_dim=1280, output_dim=128):
+        super().__init__()
+        self.output_dim = output_dim
+        self.input_dim = input_dim
+        self.hidden_dim = hidden_dim
+
+        self.model = nn.Sequential(
+            nn.Linear(self.input_dim, self.hidden_dim),
+            nn.BatchNorm1d(self.hidden_dim),
+            nn.ReLU(),
+            nn.Linear(self.hidden_dim, self.output_dim, bias=False)
+        )
+
+    def forward(self, x):
+        x = self.model(x)  
+        x = torch.abs(x)      
+        return F.normalize(x, dim=1)
+
+class Diffusion_AE(pl.LightningModule):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.unet = nets.DiffusionModelUNet(
+                    spatial_dims=2,
+                    in_channels=1,
+                    out_channels=1,
+                    num_channels=(128, 256, 256),
+                    attention_levels=(False, True, True),
+                    num_res_blocks=1,
+                    num_head_channels=64,
+                    with_conditioning=True,
+                    cross_attention_dim=1,
+                )
+        
+        if hasattr(self.hparams, 'base_encoder'):
+            # template_model = getattr(torchvision.models, self.hparams.base_encoder)
+            # self.semantic_encoder = template_model(num_classes=4*self.hparams.emb_dim)
+
+            template_model = getattr(monai.networks.nets, self.hparams.base_encoder)
+            model_params = eval('dict(%s)' % self.hparams.base_encoder_params.replace(' ',''))
+            self.semantic_encoder = template_model(**model_params)
+            
+            if hasattr(self.semantic_encoder, 'classifier'):
+                self.semantic_encoder.classifier = nn.Sequential(
+                    self.semantic_encoder.classifier,
+                    ProjectionHead(input_dim=4*self.hparams.emb_dim, hidden_dim=self.hparams.hidden_dim, output_dim=self.hparams.emb_dim)
+                )            
+
+            elif hasattr(self.semantic_encoder, 'fc'):
+            
+                self.semantic_encoder.fc = nn.Sequential(
+                    self.semantic_encoder.fc,  # Linear(ResNet output, 4*hidden_dim)
+                    ProjectionHead(input_dim=4*self.hparams.emb_dim, hidden_dim=self.hparams.hidden_dim, output_dim=self.hparams.emb_dim)
+                )
+        else:
+            self.semantic_encoder = torchvision.models.resnet18()
+            self.semantic_encoder.conv1 = torch.nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+            self.semantic_encoder.fc = torch.nn.Linear(512, self.hparams.emb_dim)
+
+        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
+        
+        self.inferer = DiffusionInferer(self.scheduler)
+
+    # def forward(self, xt, x_cond, t=100):
+    #     latent = self.semantic_encoder(x_cond)
+    #     noise_pred = self.unet(x=xt, timesteps=t, context=latent.unsqueeze(2))
+    #     return noise_pred, latent
+
+    def forward(self, x, timesteps=100):
+        scheduler = DDIMScheduler()
+        scheduler.set_timesteps(num_inference_steps=timesteps)        
+        noise = torch.randn_like(x).to(self.device)
+        latent = self.semantic_encoder(x)
+        return self.inferer.sample(input_noise=noise, diffusion_model=self.unet, scheduler=scheduler, save_intermediates=False, conditioning=latent.unsqueeze(2), verbose=False)        
+        
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+        
+        return optimizer
+    
+
+    def training_step(self, train_batch, batch_idx):
+
+        images = train_batch
+
+        batch_size = images.shape[0]
+        
+        noise = torch.randn_like(images).to(self.device)
+        # Create timesteps
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+        # Get model prediction
+        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1
+        latent = self.semantic_encoder(images)
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("loss", loss)
+
+        return loss
+
+    def validation_step(self, val_batch, batch_idx):
+
+        images = val_batch
+
+        batch_size = images.shape[0]
+
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+
+        noise = torch.randn_like(images).to(self.device)
+        latent = self.semantic_encoder(images)
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("val_loss", loss, sync_dist=True)
+        
+    
+
+class Diffusion_AE_EncoderKL(pl.LightningModule):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.unet = nets.DiffusionModelUNet(
+                    spatial_dims=2,
+                    in_channels=3,
+                    out_channels=3,
+                    num_channels=(128, 256, 256),
+                    attention_levels=(False, True, True),
+                    num_res_blocks=1,
+                    num_head_channels=64,
+                    with_conditioning=True,
+                    cross_attention_dim=1,
+                )
+        self.semantic_encoder = torchvision.models.resnet18()
+        self.semantic_encoder.conv1 = torch.nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
+        self.semantic_encoder.fc = torch.nn.Linear(512, self.hparams.emb_dim)
+
+        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
+        
+        self.inferer = DiffusionInferer(self.scheduler)
+        
+        
+        self.autoencoderkl = nets.AutoencoderKL(
+            spatial_dims=2,
+            in_channels=1,
+            out_channels=1,
+            num_channels=(128, 256, 384),
+            latent_channels=self.hparams.latent_channels,
+            num_res_blocks=1,
+            norm_num_groups=32,
+            attention_levels=(False, False, True),
+        )
+
+        self.resize_transform = torchvision.transforms.Resize(64)
+
+    def forward(self, x, timesteps=100):
+        z_mu, z_sigma = self.autoencoderkl.encode(x)
+        # z_mu = z_mu.detach()
+        # z_sigma = z_sigma.detach()
+
+        scheduler = DDIMScheduler()
+        scheduler.set_timesteps(num_inference_steps=timesteps)        
+        noise = torch.randn_like(z_mu).to(self.device)
+        latent = self.semantic_encoder(self.resize_transform(x))
+        return self.inferer.sample(input_noise=noise, diffusion_model=self.unet, scheduler=scheduler, save_intermediates=False, conditioning=latent.unsqueeze(2), verbose=False)        
+        
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+        
+        return optimizer
+    
+
+    def training_step(self, train_batch, batch_idx):
+
+        images = train_batch
+
+        batch_size = images.shape[0]
+
+        with torch.no_grad():
+            z_mu, z_sigma = self.autoencoderkl.encode(images)
+            z_mu = z_mu.detach()
+            # z_sigma = z_sigma.detach()
+            # z_vae = self.autoencoderkl.sampling(z_mu, z_sigma)
+        
+        images = self.resize_transform(images)
+        
+        noise = torch.randn_like(z_mu).to(self.device)
+        # Create timesteps
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+        # Get model prediction
+        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1
+        latent = self.semantic_encoder(images)
+
+        noise_pred = self.inferer(inputs=z_mu, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("loss", loss)
+
+        return loss
+
+    def validation_step(self, val_batch, batch_idx):
+
+        images = val_batch
+
+        batch_size = images.shape[0]
+
+        z_mu, z_sigma = self.autoencoderkl.encode(images)
+        # z_vae = self.autoencoderkl.sampling(z_mu, z_sigma)
+
+        images = self.resize_transform(images)
+        
+        noise = torch.randn_like(z_mu).to(self.device)
+        # Create timesteps
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+        # Get model prediction
+        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1
+        latent = self.semantic_encoder(images)
+
+        noise_pred = self.inferer(inputs=z_mu, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("val_loss", loss, sync_dist=True)
+    

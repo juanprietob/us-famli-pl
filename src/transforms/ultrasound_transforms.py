@@ -9,10 +9,8 @@ from torchvision import transforms
 # )
 
 import monai
-from monai.transforms import (    
-    AsChannelFirst,
+from monai.transforms import (        
     EnsureChannelFirst,
-    AddChannel,
     RepeatChannel,
     Compose,    
     RandFlip,
@@ -590,6 +588,38 @@ class DiffusionEvalTransforms:
                 EnsureChannelFirst(strict_check=False, channel_dim='no_channel'),
                 # ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
                 transforms.CenterCrop(height)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+
+class DiffusionV2TrainTransforms:
+    def __init__(self, height: int = 64):
+
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                FirstChannelOnly(),
+                transforms.Resize(height),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
+                transforms.RandomHorizontalFlip(),
+                # transforms.RandomRotation(180)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.train_transform(inp)        
+
+class DiffusionV2EvalTransforms:
+    def __init__(self, height: int = 64):
+
+        self.eval_transform = transforms.Compose(
+            [                
+                FirstChannelOnly(),
+                transforms.Resize(height),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
             ]
         )
 
