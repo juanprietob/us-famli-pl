@@ -39,7 +39,6 @@ def main(args):
     NN = getattr(diffusion, args.nn)
     model = NN(**vars(args))
 
-
     # train_transform = DiffusionTrainTransforms()
     # valid_transform = DiffusionEvalTransforms()
 
@@ -53,12 +52,10 @@ def main(args):
 
     #     usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform, repeat_channel=False)
 
-    train_transform = DiffusionV2TrainTransforms()
-    valid_transform = DiffusionV2EvalTransforms()
+    train_transform = DiffusionV2TrainTransforms(height=args.height)
+    valid_transform = DiffusionV2EvalTransforms(height=args.height)
 
     usdata = USDataModuleV2(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=args.img_column, drop_last=True, train_transform=train_transform, valid_transform=valid_transform)
-
-    
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.out,
@@ -86,7 +83,7 @@ def main(args):
         if args.target_column:
             image_logger = DiffusionImageLoggerPairedNeptune(num_images=args.num_images)
         else:
-            image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images)
+            image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images, log_steps=args.log_steps)
         callbacks.append(image_logger)
 
     trainer = Trainer(
@@ -120,13 +117,19 @@ if __name__ == '__main__':
     hparams_group.add_argument('--kl_weight', help='Weight decay for optimizer', type=float, default=1e-6)    
     hparams_group.add_argument('--autoencoder_warm_up_n_epochs', help='Warmup epochs', type=float, default=10)        
     hparams_group.add_argument('--num_train_timesteps', help='Num train steps for ddpml', type=int, default=1000)
+    hparams_group.add_argument('--in_channels', help='Number of input channels in the image', type=int, default=1)    
+    hparams_group.add_argument('--out_channels', help='Number of output channels in the image', type=int, default=1)    
     hparams_group.add_argument('--latent_channels', help='Latent Channels', type=int, default=3)    
     hparams_group.add_argument('--denoise', help='Use noise transform during training', type=int, default=1)    
-    hparams_group.add_argument('--smooth', help='Use smooth transform during training', type=int, default=1)    
+    hparams_group.add_argument('--smooth', help='Use smooth transform during training', type=int, default=1)
+    # hparams_group.add_argument('--transform', help='Use v3 transform', type=str, default="v2")
+    hparams_group.add_argument('--height', help='Image size', type=int, default=128)
 
     input_group = parser.add_argument_group('Input')
     input_group.add_argument('--nn', help='Type of neural network', type=str, default="AutoEncoderKL")
     input_group.add_argument('--model', help='Model to continue training', type=str, default= None)
+    input_group.add_argument('--model_ae', help='KL Autoencoder model', type=str, default= None)
+    input_group.add_argument('--nn_ae', help='Type of neural network', type=str, default="AutoEncoderKL")
     input_group.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")    
     input_group.add_argument('--img_column', help='Name of the column with source images', type=str, default="img_path")    
     input_group.add_argument('--target_column', help='Name of the column for the target images', type=str, default=None)    
@@ -143,6 +146,7 @@ if __name__ == '__main__':
     log_group = parser.add_argument_group('Logging')
     log_group.add_argument('--neptune_tags', help='Neptune tags', type=str, nargs="+", default=None)
     log_group.add_argument('--num_images', help='Max number of images', type=int, default=16)
+    log_group.add_argument('--log_steps', help='Number of log steps', type=int, default=100)
     log_group.add_argument('--tb_dir', help='Tensorboard output dir', type=str, default=None)
     log_group.add_argument('--tb_name', help='Tensorboard experiment name', type=str, default="diffusion")
 

@@ -18,7 +18,7 @@ from monai.transforms import (
 )
 
 class USDataset(Dataset):
-    def __init__(self, df, mount_point = "./", transform=None, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, repeat_channel=True, return_head=False):
+    def __init__(self, df, mount_point = "./", transform=None, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, repeat_channel=False, return_head=False):
         self.df = df
         self.mount_point = mount_point
         self.transform = transform
@@ -40,9 +40,9 @@ class USDataset(Dataset):
             if os.path.splitext(img_path)[1] == ".nrrd":
                 img, head = nrrd.read(img_path, index_order="C")
                 img = img.astype(float)
-                # img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))
+                # img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))                
                 img = torch.tensor(img, dtype=torch.float32)
-                img = img.squeeze()
+                img = img.squeeze()                
                 if self.repeat_channel:
                     img = img.unsqueeze(0).repeat(3,1,1)
             else:
@@ -57,7 +57,7 @@ class USDataset(Dataset):
             img = torch.tensor(np.zeros([3, 256, 256]), dtype=torch.float32)
 
         if(self.transform):
-            img = self.transform(img)
+            img = self.transform(img)            
 
         if self.class_column:
             return img, torch.tensor(self.df.iloc[idx][self.class_column]).to(torch.long)

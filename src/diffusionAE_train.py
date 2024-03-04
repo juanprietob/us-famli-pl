@@ -42,8 +42,12 @@ def main(args):
     if args.nn2 is not None:
         print("Loading! model 2")
         model2 = getattr(diffusion, args.nn2).load_from_checkpoint(args.model2)
+        model2.eval()
         model2.freeze()
-        model.autoencoderkl = model2.autoencoderkl
+        model2 = model2.autoencoderkl
+        model.encoder = model2.encoder
+        # model.quant_conv_mu = model2.quant_conv_mu
+        # model.quant_conv_log_sigma = model2.quant_conv_log_sigma
 
     train_transform = DiffusionV2TrainTransforms(args.height)
     valid_transform = DiffusionV2EvalTransforms(args.height)
@@ -78,7 +82,7 @@ def main(args):
         if args.target_column:
             image_logger = DiffusionImageLoggerPairedNeptune(num_images=args.num_images)
         else:
-            image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images)
+            image_logger = DiffusionImageLoggerNeptune(num_images=args.num_images, log_steps=args.log_steps)
 
         callbacks.append(image_logger)
 
@@ -108,7 +112,9 @@ if __name__ == '__main__':
     hparams_group.add_argument('--patience', help='Max number of patience steps for EarlyStopping', type=int, default=30)
     hparams_group.add_argument('--steps', help='Max number of steps per epoch', type=int, default=-1)    
     hparams_group.add_argument('--batch_size', help='Batch size', type=int, default=256)
-    hparams_group.add_argument('--height', help='Size of the image for the resize transform operation', type=int, default=64)
+    hparams_group.add_argument('--in_channels', help='Number of input channels in the image', type=int, default=1)    
+    hparams_group.add_argument('--out_channels', help='Number of output channels in the image', type=int, default=1)    
+    hparams_group.add_argument('--height', help='Size of the image for the resize transform operation', type=int, default=128)
     hparams_group.add_argument('--num_train_timesteps', help='Num train steps for ddpml', type=int, default=1000)
     hparams_group.add_argument('--emb_dim', help='Embeding dimension', type=int, default=512)
     hparams_group.add_argument('--latent_channels', help='Latent channels', type=int, default=3)
@@ -137,7 +143,8 @@ if __name__ == '__main__':
     
     log_group = parser.add_argument_group('Logging')
     log_group.add_argument('--neptune_tags', help='Neptune tags', type=str, nargs="+", default=None)
-    log_group.add_argument('--num_images', help='Max number of images', type=int, default=16)
+    log_group.add_argument('--num_images', help='Max number of images', type=int, default=1)
+    log_group.add_argument('--log_steps', help='Log every N steps', type=int, default=50)
     log_group.add_argument('--tb_dir', help='Tensorboard output dir', type=str, default=None)
     log_group.add_argument('--tb_name', help='Tensorboard experiment name', type=str, default="diffusion")
 

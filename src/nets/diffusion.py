@@ -4,6 +4,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 import functools
 import torchvision 
+from torchvision.transforms import v2
 
 import pytorch_lightning as pl
 
@@ -106,6 +107,7 @@ class AutoEncoderKL(pl.LightningModule):
         if hasattr(self.hparams, "denoise") and self.hparams.denoise: 
             self.noise_transform = torch.nn.Sequential(
                 GaussianNoise(0.0, 0.05),
+                # v2.RandomApply([v2.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2])], p=0.3),
                 RandCoarseShuffle(),
                 SaltAndPepper()
             )
@@ -113,7 +115,7 @@ class AutoEncoderKL(pl.LightningModule):
             self.noise_transform = nn.Identity()
 
         if hasattr(self.hparams, "smooth") and self.hparams.smooth: 
-            self.smooth_transform = transforms.RandSimulateLowResolution(prob=1.0, zoom_range=(0.15, 0.3))
+            self.smooth_transform = transforms.RandSimulateLowResolution(prob=0.75, zoom_range=(0.15, 0.3))
         else:
             self.smooth_transform = nn.Identity()
         
@@ -157,7 +159,7 @@ class AutoEncoderKL(pl.LightningModule):
 
         optimizer_g, optimizer_d = self.optimizers()
 
-        reconstruction, z_mu, z_sigma = self.autoencoderkl(self.smooth_transform(self.noise_transform(x)))
+        reconstruction, z_mu, z_sigma = self.autoencoderkl(self.noise_transform(self.smooth_transform(x)))
 
         loss_g, recons_loss = self.compute_loss_generator(x, reconstruction, z_mu, z_sigma)
 
@@ -2017,7 +2019,6 @@ class Diffusion_AE(pl.LightningModule):
         optimizer = optim.AdamW(self.parameters(),
                                 lr=self.hparams.lr,
                                 weight_decay=self.hparams.weight_decay)
-        
         return optimizer
     
 
@@ -2057,15 +2058,15 @@ class Diffusion_AE(pl.LightningModule):
         
     
 
-class Diffusion_AE_EncoderKL(pl.LightningModule):
+class Diffusion_KLAE(pl.LightningModule):
     def __init__(self, **kwargs):
         super().__init__()
         self.save_hyperparameters()
 
         self.unet = nets.DiffusionModelUNet(
                     spatial_dims=2,
-                    in_channels=3,
-                    out_channels=3,
+                    in_channels=self.hparams.in_channels,
+                    out_channels=self.hparams.out_channels,
                     num_channels=(128, 256, 256),
                     attention_levels=(False, True, True),
                     num_res_blocks=1,
@@ -2073,37 +2074,51 @@ class Diffusion_AE_EncoderKL(pl.LightningModule):
                     with_conditioning=True,
                     cross_attention_dim=1,
                 )
-        self.semantic_encoder = torchvision.models.resnet18()
-        self.semantic_encoder.conv1 = torch.nn.Conv2d(1, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        self.semantic_encoder.fc = torch.nn.Linear(512, self.hparams.emb_dim)
-
-        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
-        
-        self.inferer = DiffusionInferer(self.scheduler)
-        
-        
-        self.autoencoderkl = nets.AutoencoderKL(
+        autoencoder = nets.AutoencoderKL(
             spatial_dims=2,
-            in_channels=1,
-            out_channels=1,
+            in_channels=self.hparams.in_channels,
+            out_channels=self.hparams.out_channels,
             num_channels=(128, 256, 384),
             latent_channels=self.hparams.latent_channels,
             num_res_blocks=1,
             norm_num_groups=32,
             attention_levels=(False, False, True),
         )
+        self.encoder = autoencoder.encoder
+        # self.quant_conv_mu = autoencoder.quant_conv_mu
+        # self.quant_conv_log_sigma = autoencoder.quant_conv_log_sigma
 
-        self.resize_transform = torchvision.transforms.Resize(64)
+        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
+        
+        self.inferer = DiffusionInferer(self.scheduler)
+
+        self.resize_transform = torchvision.transforms.Resize(128)
+
+    # def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    #     h = self.encoder(x)
+
+    #     z_mu = self.quant_conv_mu(h)
+    #     z_log_var = self.quant_conv_log_sigma(h)
+    #     z_log_var = torch.clamp(z_log_var, -30.0, 20.0)
+    #     z_sigma = torch.exp(z_log_var / 2)
+
+    #     return z_mu, z_sigma
+
+    # def sampling(self, z_mu: torch.Tensor, z_sigma: torch.Tensor) -> torch.Tensor:
+    #     eps = torch.randn_like(z_sigma)
+    #     z_vae = z_mu + eps * z_sigma
+    #     return z_vae
+
 
     def forward(self, x, timesteps=100):
-        z_mu, z_sigma = self.autoencoderkl.encode(x)
-        # z_mu = z_mu.detach()
-        # z_sigma = z_sigma.detach()
+        # z_mu, z_sigma = self.encode(self.resize_transform(x))
+        # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+        latent = self.encoder(x).flatten(1)
 
         scheduler = DDIMScheduler()
         scheduler.set_timesteps(num_inference_steps=timesteps)        
-        noise = torch.randn_like(z_mu).to(self.device)
-        latent = self.semantic_encoder(self.resize_transform(x))
+        noise = torch.randn_like(x).to(self.device)
+        
         return self.inferer.sample(input_noise=noise, diffusion_model=self.unet, scheduler=scheduler, save_intermediates=False, conditioning=latent.unsqueeze(2), verbose=False)        
         
 
@@ -2122,21 +2137,17 @@ class Diffusion_AE_EncoderKL(pl.LightningModule):
         batch_size = images.shape[0]
 
         with torch.no_grad():
-            z_mu, z_sigma = self.autoencoderkl.encode(images)
-            z_mu = z_mu.detach()
-            # z_sigma = z_sigma.detach()
-            # z_vae = self.autoencoderkl.sampling(z_mu, z_sigma)
+            # z_mu, z_sigma = self.encode(images)
+            # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+            # latent = z_vae
+            latent = self.encoder(images).flatten(1)
         
-        images = self.resize_transform(images)
-        
-        noise = torch.randn_like(z_mu).to(self.device)
+        noise = torch.randn_like(images).to(self.device)
         # Create timesteps
         timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
-        # Get model prediction
-        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1
-        latent = self.semantic_encoder(images)
-
-        noise_pred = self.inferer(inputs=z_mu, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        
+        
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
         loss = F.mse_loss(noise_pred.float(), noise.float())
 
         self.log("loss", loss)
@@ -2149,20 +2160,143 @@ class Diffusion_AE_EncoderKL(pl.LightningModule):
 
         batch_size = images.shape[0]
 
-        z_mu, z_sigma = self.autoencoderkl.encode(images)
-        # z_vae = self.autoencoderkl.sampling(z_mu, z_sigma)
-
-        images = self.resize_transform(images)
+        # z_mu, z_sigma = self.encode(images)
+        # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+        # latent = z_vae
+        latent = self.encoder(images).flatten(1)
         
-        noise = torch.randn_like(z_mu).to(self.device)
+        noise = torch.randn_like(images).to(self.device)
         # Create timesteps
         timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
         # Get model prediction
-        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1
-        latent = self.semantic_encoder(images)
+        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1        
 
-        noise_pred = self.inferer(inputs=z_mu, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
         loss = F.mse_loss(noise_pred.float(), noise.float())
 
         self.log("val_loss", loss, sync_dist=True)
     
+
+class Diffusion_AEKL(pl.LightningModule):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+
+        self.unet = nets.DiffusionModelUNet(
+                    spatial_dims=2,
+                    in_channels=self.hparams.in_channels,
+                    out_channels=self.hparams.out_channels,
+                    num_channels=(128, 256, 256),
+                    attention_levels=(False, True, True),
+                    num_res_blocks=1,
+                    num_head_channels=64,
+                    with_conditioning=True,
+                    cross_attention_dim=1,
+                )
+        autoencoder = nets.AutoencoderKL(
+            spatial_dims=2,
+            in_channels=self.hparams.in_channels,
+            out_channels=self.hparams.out_channels,
+            num_channels=(128, 256, 384),
+            latent_channels=self.hparams.latent_channels,
+            num_res_blocks=1,
+            norm_num_groups=32,
+            attention_levels=(False, False, True),
+        )
+        self.encoder = autoencoder.encoder
+        # self.quant_conv_mu = autoencoder.quant_conv_mu
+        # self.quant_conv_log_sigma = autoencoder.quant_conv_log_sigma
+
+        self.scheduler = DDIMScheduler(num_train_timesteps=1000)
+        
+        self.inferer = DiffusionInferer(self.scheduler)
+
+        self.resize_transform = torchvision.transforms.Resize(128)
+
+    # def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    #     h = self.encoder(x)
+
+    #     z_mu = self.quant_conv_mu(h)
+    #     z_log_var = self.quant_conv_log_sigma(h)
+    #     z_log_var = torch.clamp(z_log_var, -30.0, 20.0)
+    #     z_sigma = torch.exp(z_log_var / 2)
+
+    #     return z_mu, z_sigma
+
+    # def sampling(self, z_mu: torch.Tensor, z_sigma: torch.Tensor) -> torch.Tensor:
+    #     eps = torch.randn_like(z_sigma)
+    #     z_vae = z_mu + eps * z_sigma
+    #     return z_vae
+
+
+    def forward(self, x, timesteps=100):
+        # z_mu, z_sigma = self.encode(self.resize_transform(x))
+        # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+        h = self.encoder(x)
+        latent = h.flatten(1)
+        images = self.resize_transform(h)
+
+        scheduler = DDIMScheduler()
+        scheduler.set_timesteps(num_inference_steps=timesteps)        
+        noise = torch.randn_like(images).to(self.device)
+        
+        return self.inferer.sample(input_noise=noise, diffusion_model=self.unet, scheduler=scheduler, save_intermediates=False, conditioning=latent.unsqueeze(2), verbose=False)        
+        
+
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.hparams.lr,
+                                weight_decay=self.hparams.weight_decay)
+        
+        return optimizer
+    
+
+    def training_step(self, train_batch, batch_idx):
+
+        images = train_batch
+
+        batch_size = images.shape[0]
+
+        with torch.no_grad():
+            # z_mu, z_sigma = self.encode(images)
+            # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+            # latent = z_vae
+            h = self.encoder(images).detach()
+            latent = h.flatten(1)
+        
+        images = self.resize_transform(h)
+        noise = torch.randn_like(images).to(self.device)
+        # Create timesteps
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+        
+        
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("loss", loss)
+
+        return loss
+
+    def validation_step(self, val_batch, batch_idx):
+
+        images = val_batch
+
+        batch_size = images.shape[0]
+
+        # z_mu, z_sigma = self.encode(images)
+        # z_vae = self.sampling(z_mu, z_sigma).flatten(1)
+        # latent = z_vae
+        h = self.encoder(images)
+        latent = h.flatten(1)
+        images = self.resize_transform(h)
+        
+        noise = torch.randn_like(images).to(self.device)
+        # Create timesteps
+        timesteps = torch.randint(0, self.inferer.scheduler.num_train_timesteps, (batch_size,)).to(self.device).long()
+        # Get model prediction
+        # cross attention expects shape [batch size, sequence length, channels], we are use channels = latent dimension and sequence length = 1        
+
+        noise_pred = self.inferer(inputs=images, diffusion_model=self.unet, noise=noise, timesteps=timesteps, condition = latent.unsqueeze(2))
+        loss = F.mse_loss(noise_pred.float(), noise.float())
+
+        self.log("val_loss", loss, sync_dist=True)

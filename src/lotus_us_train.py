@@ -66,7 +66,7 @@ def main(args):
     must_us_data = MUSTUSDataModule(labeled_ds_train, labeled_ds_val, us_ds_train, us_ds_val, batch_size=args.batch_size, num_workers=args.num_workers)
 
 
-    must_us_data.setup()
+    # must_us_data.setup()
 
     # train_ds = must_us_data.train_dataloader()
     # for idx, batch in enumerate(train_ds):

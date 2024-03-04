@@ -34,6 +34,7 @@ from monai import transforms as monai_transforms
 
 
 
+
 ### TRANSFORMS
 class SaltAndPepper:    
     def __init__(self, prob=0.2):
@@ -304,13 +305,21 @@ class USClassTrainTransforms:
 
 class USClassEvalTransforms:
 
-    def __init__(self, size=256, unsqueeze=False):
+    def __init__(self, size=256, unsqueeze=False, channel_first=False):
 
-        self.test_transform = transforms.Compose(
-            [   
+        transforms_arr = []
+
+        if channel_first:
+            transforms_arr.append(EnsureChannelFirst(strict_check=False, channel_dim=-1),)
+
+        
+        transforms_arr += [   
                 ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
                 transforms.CenterCrop(size),
             ]
+
+        self.test_transform = transforms.Compose(
+            transforms_arr
         )
         self.unsqueeze = unsqueeze
 
@@ -388,6 +397,35 @@ class USEvalGATransforms:
                 RepeatChannel(3),                
                 transforms.Lambda(lambda x: torch.permute(x, (1,0,2,3))),
                 transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+class USEvalSimTransforms:
+    def __init__(self, height: int = 256, repeat_channel=3, scale_a_max=255.0):
+
+        self.eval_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim='no_channel'),
+                transforms.CenterCrop(height),                                
+                ScaleIntensityRange(a_min=0.0, a_max=scale_a_max, b_min=0.0, b_max=1.0),
+                RepeatChannel(repeat_channel)
+            ]
+        )
+
+    def __call__(self, inp):
+        return self.eval_transform(inp)
+
+class USEvalRealTransforms:
+    def __init__(self, height: int = 256, repeat_channel=3):
+
+        self.eval_transform = transforms.Compose(
+            [
+                EnsureChannelFirst(strict_check=False, channel_dim=2),                
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
+                transforms.CenterCrop(height)
             ]
         )
 
@@ -586,8 +624,8 @@ class DiffusionEvalTransforms:
         self.eval_transform = transforms.Compose(
             [
                 EnsureChannelFirst(strict_check=False, channel_dim='no_channel'),
-                # ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
-                transforms.CenterCrop(height)
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
+                transforms.Resize(height)
             ]
         )
 
@@ -602,15 +640,15 @@ class DiffusionV2TrainTransforms:
         self.train_transform = transforms.Compose(
             [
                 FirstChannelOnly(),
-                transforms.Resize(height),
-                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
+                transforms.Resize(height, antialias=True),
+                ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
                 transforms.RandomHorizontalFlip(),
                 # transforms.RandomRotation(180)
             ]
         )
 
     def __call__(self, inp):
-        return self.train_transform(inp)        
+        return self.train_transform(inp)
 
 class DiffusionV2EvalTransforms:
     def __init__(self, height: int = 64):
@@ -618,7 +656,7 @@ class DiffusionV2EvalTransforms:
         self.eval_transform = transforms.Compose(
             [                
                 FirstChannelOnly(),
-                transforms.Resize(height),
+                transforms.Resize(height, antialias=True),
                 ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),                
             ]
         )

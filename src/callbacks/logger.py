@@ -263,20 +263,29 @@ class DiffusionImageLoggerNeptune(Callback):
                     z_vae = z_vae.clip(0,1)
                     z_mu = z_mu.clip(0, 1)
 
-                    grid_x_z_mu = torchvision.utils.make_grid(z_mu[0:max_num_image])
+                    grid_x_z_mu = torchvision.utils.make_grid(z_mu[0:max_num_image,0:3])
 
                     fig = plt.figure(figsize=(7, 9))
                     ax = plt.imshow(grid_x_z_mu.permute(1, 2, 0).cpu().numpy())
                     trainer.logger.experiment["images/z_mu"].upload(fig)
                     plt.close()
 
-                    grid_x_z_vae = torchvision.utils.make_grid(z_vae[0:max_num_image])
+                    grid_x_z_vae = torchvision.utils.make_grid(z_vae[0:max_num_image,0:3])
 
                     fig = plt.figure(figsize=(7, 9))
                     ax = plt.imshow(grid_x_z_vae.permute(1, 2, 0).cpu().numpy())
                     trainer.logger.experiment["images/z_vae"].upload(fig)
                     plt.close()
-                
+
+                if hasattr(pl_module, 'encoder'):
+                    h = pl_module.encoder(x)                    
+                    h = (h - torch.min(h))/(torch.max(h) - torch.min(h))
+                    grid_h = torchvision.utils.make_grid(h[0:max_num_image,0:3])
+
+                    fig = plt.figure(figsize=(7, 9))
+                    ax = plt.imshow(grid_h.permute(1, 2, 0).cpu().numpy())
+                    trainer.logger.experiment["images/h"].upload(fig)
+                    plt.close()
 
 
 class DiffusionImageLoggerPairedNeptune(Callback):

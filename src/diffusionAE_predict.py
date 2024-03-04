@@ -6,7 +6,7 @@ import numpy as np
 
 import torch
 from loaders.ultrasound_dataset import USDataset
-from transforms.ultrasound_transforms import DiffusionV2EvalTransforms
+from transforms.ultrasound_transforms import DiffusionEvalTransforms, DiffusionV2EvalTransforms
 from torch.utils.data import DataLoader
 from nets import diffusion
 
@@ -18,7 +18,7 @@ def main(args):
 
     if args.dir:
         df_test = []
-        for fn in Path(args.dir).glob('*.nrrd'):
+        for fn in Path(args.dir).rglob('*.nrrd'):
             df_test.append({args.img_column: fn.as_posix()})
         df_test = pd.DataFrame(df_test)
     else:
@@ -33,7 +33,7 @@ def main(args):
     model.eval()
     model.cuda()
     
-    valid_transform = DiffusionV2EvalTransforms(args.height)
+    valid_transform = DiffusionEvalTransforms(args.height)
 
     test_ds = USDataset(df_test, args.mount_point, img_column=args.img_column, transform=valid_transform)
     test_loader = DataLoader(test_ds, batch_size=1, num_workers=args.num_workers, pin_memory=True)

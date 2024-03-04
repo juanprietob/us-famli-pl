@@ -10,7 +10,7 @@ import sys
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
-
+import monai
 
 import pytorch_lightning as pl
 import pickle
@@ -29,7 +29,7 @@ class ConcatDataset(torch.utils.data.Dataset):
         return min(len(d) for d in self.datasets)
 
     def shuffle(self):
-        for d in self.datasets:
+        for d in self.datasets:            
             d.df = d.df.sample(frac=1.0).reset_index(drop=True)
 
 

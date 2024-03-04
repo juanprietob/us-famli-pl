@@ -52,10 +52,10 @@ def main(args):
 
         #df_test[args.class_column] = df_test[args.class_column].replace(class_replace)
 
-        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, transform=USClassEvalTransforms())    
+        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, transform=USClassEvalTransforms(channel_first=args.channel_first))    
     else:
 
-        test_ds = USDataset(df_test, img_column=args.img_column, transform=USClassEvalTransforms())
+        test_ds = USDataset(df_test, img_column=args.img_column, transform=USClassEvalTransforms(channel_first=args.channel_first))
 
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
 
@@ -118,6 +118,7 @@ if __name__ == '__main__':
     parser.add_argument('--extract_features', type=int, help='Extract the features', default=0)
     parser.add_argument('--img_column', type=str, help='Column name in the csv file with image path', default="uuid_path")
     parser.add_argument('--class_column', type=str, help='Column name in the csv file with classes', default=None)
+    parser.add_argument('--channel_first', type=int, help='Use channel first transform', default=0)
     parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='Learning rate')
     parser.add_argument('--model', help='Model path to continue training', type=str, default=None)
     parser.add_argument('--epochs', help='Max number of epochs', type=int, default=200)    

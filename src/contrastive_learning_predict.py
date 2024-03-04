@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch import nn 
 from loaders.ultrasound_dataset import USDataset
-from transforms.ultrasound_transforms import Moco2TestTransforms, SimCLRTestTransforms, SimTestTransforms
+from transforms.ultrasound_transforms import Moco2TestTransforms, SimCLRTestTransforms, SimTestTransforms, USEvalSimTransforms, USEvalRealTransforms
 # from pl_bolts.models.self_supervised import Moco_v2
 from nets.contrastive import USMoco, SimCLR, Sim, SimScore, SimNorth
 from tqdm import tqdm
@@ -41,7 +41,11 @@ def main(args):
         
         transform = SimTestTransforms(224)
     elif args.nn == "simscore":
-        model = SimScore(emb_dim=args.emb_dim, base_encoder=args.base_encoder, hidden_dim=args.hidden_dim).load_from_checkpoint(args.model)
+        model = SimScore.load_from_checkpoint(args.model)
+        if args.transform == "sim":
+            transform = USEvalSimTransforms(224, scale_a_max=args.scale_a_max)
+        else:
+            transform = USEvalRealTransforms(224)
     elif args.nn == "simnorth":
         model = SimNorth(args).load_from_checkpoint(args.model)
         
@@ -114,12 +118,15 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
     parser.add_argument('--batch_size', help='Batch size', type=int, default=256)
     parser.add_argument('--nn', help='Type of neural network', type=str, default="moco_v2")
-    parser.add_argument('--emb_dim', help='Embedding dimension', type=int, default=128)
-    parser.add_argument('--hidden_dim', help='Hidden Embedding dimension', type=int, default=None)
+    parser.add_argument('--transform', help='Type of transform', type=str, default="real")
+    parser.add_argument('--scale_a_max', help='Scale maximum intensity', type=float, default=255.0)
+    
+    # parser.add_argument('--emb_dim', help='Embedding dimension', type=int, default=128)
+    # parser.add_argument('--hidden_dim', help='Hidden Embedding dimension', type=int, default=None)
     # parser.add_argument('--compute_feat', help='Remove last MLP Layer', type=bool, default=False)
-    parser.add_argument('--base_encoder', help='What encoder to use', type=str, default='efficientnet_b0')
-    parser.add_argument('--n_clusters', help='Guess number of clusters', type=int, default=64)
-    parser.add_argument('--n_lights', help='Light house', type=int, default=10)
+    # parser.add_argument('--base_encoder', help='What encoder to use', type=str, default='efficientnet_b0')
+    # parser.add_argument('--n_clusters', help='Guess number of clusters', type=int, default=64)
+    # parser.add_argument('--n_lights', help='Light house', type=int, default=10)
 
 
     args = parser.parse_args()
