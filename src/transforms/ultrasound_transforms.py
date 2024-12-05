@@ -305,12 +305,14 @@ class USClassTrainTransforms:
 
 class USClassEvalTransforms:
 
-    def __init__(self, size=256, unsqueeze=False, channel_first=False):
+    def __init__(self, size=256, channel_dim=-1, repeat_channel=False):
 
         transforms_arr = []
-
-        if channel_first:
-            transforms_arr.append(EnsureChannelFirst(strict_check=False, channel_dim=-1),)
+        
+        transforms_arr.append(EnsureChannelFirst(strict_check=False, channel_dim=channel_dim),)
+        
+        if repeat_channel > 0:
+            transforms_arr.append(RepeatChannel(repeat_channel))
 
         
         transforms_arr += [   
@@ -321,12 +323,9 @@ class USClassEvalTransforms:
         self.test_transform = transforms.Compose(
             transforms_arr
         )
-        self.unsqueeze = unsqueeze
 
     def __call__(self, inp):
         inp = self.test_transform(inp)
-        if self.unsqueeze:
-            return inp.unsqueeze(dim=0)
         return inp
 
 class USTrainTransforms:

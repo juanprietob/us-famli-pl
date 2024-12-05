@@ -33,9 +33,9 @@ def main(args):
         model.extract_features = True
 
     if(os.path.splitext(args.csv)[1] == ".csv"):        
-        df_test = pd.read_csv(os.path.join(args.mount_point, args.csv))
+        df_test = pd.read_csv(args.csv)
     else:        
-        df_test = pd.read_parquet(os.path.join(args.mount_point, args.csv))
+        df_test = pd.read_parquet(args.csv)
 
     use_class_column = False
     if args.class_column is not None and args.class_column in df_test.columns:
@@ -52,10 +52,10 @@ def main(args):
 
         #df_test[args.class_column] = df_test[args.class_column].replace(class_replace)
 
-        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, transform=USClassEvalTransforms(channel_first=args.channel_first))    
+        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, mount_point=args.mount_point, transform=USClassEvalTransforms(channel_dim=args.channel_dim, repeat_channel=args.repeat_channel))    
     else:
 
-        test_ds = USDataset(df_test, img_column=args.img_column, transform=USClassEvalTransforms(channel_first=args.channel_first))
+        test_ds = USDataset(df_test, img_column=args.img_column, mount_point=args.mount_point, transform=USClassEvalTransforms(channel_dim=args.channel_dim, repeat_channel=args.repeat_channel))
 
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
 
@@ -118,7 +118,8 @@ if __name__ == '__main__':
     parser.add_argument('--extract_features', type=int, help='Extract the features', default=0)
     parser.add_argument('--img_column', type=str, help='Column name in the csv file with image path', default="uuid_path")
     parser.add_argument('--class_column', type=str, help='Column name in the csv file with classes', default=None)
-    parser.add_argument('--channel_first', type=int, help='Use channel first transform', default=0)
+    parser.add_argument('--channel_dim', help='Where is the channel in the images', default=-1)
+    parser.add_argument('--repeat_channel', type=int, help='Repeat the channel', default=-1)
     parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='Learning rate')
     parser.add_argument('--model', help='Model path to continue training', type=str, default=None)
     parser.add_argument('--epochs', help='Max number of epochs', type=int, default=200)    
