@@ -17,15 +17,15 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 def main(args):
-    mount_point = args.mount_point
-    csv_path = os.path.join(mount_point, args.csv)
+    
+    csv_path = args.csv
 
     if(os.path.splitext(csv_path)[1] == ".csv"):        
         test_df = pd.read_csv(csv_path)
     else:
         test_df = pd.read_parquet(csv_path)
 
-    features_path = os.path.join(mount_point, args.features)
+    features_path = args.features
 
     with open(features_path, 'rb') as f:
         features = pickle.load(f)
@@ -219,7 +219,6 @@ if __name__ == '__main__':
     parser.add_argument('--features', type=str, help='Features path', required=True)
     parser.add_argument('--tsne', type=int, help='Apply TSNE', default=1)
     parser.add_argument('--perplexity', type=int, help='perplexity for TSNE', default=300)
-    parser.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")
     parser.add_argument('--n_clusters_min', help='Minimum number of clusters for elbow analysis (starting k)', type=int, default=2)
     parser.add_argument('--silhouette', help='Perform silhouette analysis for kmeans and identify the optimal number of clusters', type=bool, default=False)
     parser.add_argument('--elbow', help='Perform elbow analysis for kmeans and identify the optimal number of clusters', type=bool, default=False)

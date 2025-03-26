@@ -9,7 +9,7 @@ import sys
 import torch
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
-
+import random
 
 import pytorch_lightning as pl
 
@@ -37,42 +37,43 @@ class USDataset(Dataset):
         img_path = os.path.join(self.mount_point, self.df.iloc[idx][self.img_column])
         
         try:
-            if os.path.splitext(img_path)[1] == ".nrrd":
-                img, head = nrrd.read(img_path, index_order="C")
-                img = img.astype(float)
-                # img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))                
-                img = torch.tensor(img, dtype=torch.float32)
-                img = img.squeeze()                
-                if self.repeat_channel:
-                    img = img.unsqueeze(0).repeat(3,1,1)
-            else:
-                img = np.array(Image.open(img_path))
-                img = torch.tensor(img, dtype=torch.float32)
-                if len(img.shape) == 3:                    
-                    img = torch.permute(img, [2, 0, 1])[0:3, :, :]
-                else:                    
-                    img = img.unsqueeze(0).repeat(3,1,1)            
+            
+            img = sitk.ReadImage(img_path)
+
+            img_np = sitk.GetArrayFromImage(img)
+            img_t = torch.tensor(img_np, dtype=torch.float32)
+
+            if img.GetNumberOfComponentsPerPixel() == 1:
+                img_t = img_t.unsqueeze(-1).repeat(1, 1, 3)
+
+            img_t = img_t.permute(2, 1, 0)  # Change to (C, H, W)
+
+            if img_t.shape != (3, 256, 256):
+                print("Image shape mismatch for:" + img_path, file=sys.stderr)
+                raise Exception("Image shape mismatch")
+                
+                    
         except:
             print("Error reading frame:" + img_path, file=sys.stderr)
             img = torch.tensor(np.zeros([3, 256, 256]), dtype=torch.float32)
 
         if(self.transform):
-            img = self.transform(img)            
+            img_t = self.transform(img_t)            
 
         if self.class_column:
-            return img, torch.tensor(self.df.iloc[idx][self.class_column]).to(torch.long)
+            return img_t, torch.tensor(self.df.iloc[idx][self.class_column]).to(torch.long)
 
         if self.ga_column:
             ga = self.df.iloc[idx][self.ga_column]
-            return img, torch.tensor([ga])
+            return img_t, torch.tensor([ga])
 
         if self.scalar_column:
             scalar = self.df.iloc[idx][self.scalar_column]
-            return img, torch.tensor(scalar)            
+            return img_t, torch.tensor(scalar)            
         if self.return_head:
-            return img, head
+            return img_t, head
 
-        return img
+        return img_t
 
 class USDatasetV2(Dataset):
     def __init__(self, df, mount_point = "./", transform=None, img_column="img_path", class_column=None, ga_column=None, scalar_column=None, return_head=False):
@@ -617,47 +618,6 @@ class USDataModuleVolumes(pl.LightningDataModule):
 
         return volumes, ga
 
-
-
-
-
-class USZDataset(Dataset):
-    def __init__(self, df, mount_point = "./", transform=None, img_column="img_path"):
-        self.df = df
-        self.mount_point = mount_point
-        self.transform = transform
-        self.img_column = img_column        
-
-    def __len__(self):
-        return len(self.df.index)
-
-    def __getitem__(self, idx):
-        
-        img_path = os.path.join(self.mount_point, self.df.iloc[idx][self.img_column])
-
-        img_path_z_mu = img_path.replace(".nrrd", "z_mu.nrrd")
-        img_path_z_sigma = img_path.replace(".nrrd", "z_mu.nrrd")
-
-        z_mu, head = nrrd.read(img_path_z_mu, index_order="C")
-        z_sigma, head = nrrd.read(img_path_z_mu, index_order="C")
-
-        
-        z_mu = torch.tensor(z_mu, dtype=torch.float32)
-        z_sigma = torch.tensor(z_sigma, dtype=torch.float32)
-
-        if len(z_mu.shape) == 2:
-            z_mu = z_mu.unsqueeze(0)
-        if len(z_sigma.shape) == 2:
-            z_sigma = z_sigma.unsqueeze(0)
-            
-        
-        img = {"z_mu": z_mu, "z_sigma": z_sigma}
-        
-        if(self.transform):
-            img = self.transform(img)
-        
-        return img
-
 class USZDataModule(pl.LightningDataModule):
     def __init__(self, df_train, df_val, df_test, mount_point="./", batch_size=256, num_workers=4, img_column="img_path", train_transform=None, valid_transform=None, test_transform=None, drop_last=False):
         super().__init__()
@@ -689,4 +649,3 @@ class USZDataModule(pl.LightningDataModule):
 
     def test_dataloader(self):
         return DataLoader(self.test_ds, batch_size=self.batch_size, num_workers=self.num_workers, persistent_workers=True, pin_memory=True, drop_last=self.drop_last)
-

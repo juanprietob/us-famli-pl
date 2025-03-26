@@ -52,10 +52,10 @@ def main(args):
 
         #df_test[args.class_column] = df_test[args.class_column].replace(class_replace)
 
-        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, mount_point=args.mount_point, transform=USClassEvalTransforms(channel_dim=args.channel_dim, repeat_channel=args.repeat_channel))    
+        test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, mount_point=args.mount_point, transform=USClassEvalTransforms())    
     else:
 
-        test_ds = USDataset(df_test, img_column=args.img_column, mount_point=args.mount_point, transform=USClassEvalTransforms(channel_dim=args.channel_dim, repeat_channel=args.repeat_channel))
+        test_ds = USDataset(df_test, img_column=args.img_column, mount_point=args.mount_point, transform=USClassEvalTransforms())
 
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
 
@@ -118,8 +118,6 @@ if __name__ == '__main__':
     parser.add_argument('--extract_features', type=int, help='Extract the features', default=0)
     parser.add_argument('--img_column', type=str, help='Column name in the csv file with image path', default="uuid_path")
     parser.add_argument('--class_column', type=str, help='Column name in the csv file with classes', default=None)
-    parser.add_argument('--channel_dim', help='Where is the channel in the images', default=-1)
-    parser.add_argument('--repeat_channel', type=int, help='Repeat the channel', default=-1)
     parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='Learning rate')
     parser.add_argument('--model', help='Model path to continue training', type=str, default=None)
     parser.add_argument('--epochs', help='Max number of epochs', type=int, default=200)    
@@ -127,7 +125,7 @@ if __name__ == '__main__':
     parser.add_argument('--pred_column', help='Output column name', type=str, default="pred_class")
     parser.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")
     parser.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
-    parser.add_argument('--batch_size', help='Batch size', type=int, default=256)
+    parser.add_argument('--batch_size', help='Batch size', type=int, default=128)
     parser.add_argument('--nn', help='Type of neural network', type=str, default="efficientnet_b0")
 
     args = parser.parse_args()

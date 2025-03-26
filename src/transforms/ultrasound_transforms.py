@@ -305,17 +305,9 @@ class USClassTrainTransforms:
 
 class USClassEvalTransforms:
 
-    def __init__(self, size=256, channel_dim=-1, repeat_channel=False):
+    def __init__(self, size=256):
 
-        transforms_arr = []
-        
-        transforms_arr.append(EnsureChannelFirst(strict_check=False, channel_dim=channel_dim),)
-        
-        if repeat_channel > 0:
-            transforms_arr.append(RepeatChannel(repeat_channel))
-
-        
-        transforms_arr += [   
+        transforms_arr = [   
                 ScaleIntensityRange(a_min=0.0, a_max=255.0, b_min=0.0, b_max=1.0),
                 transforms.CenterCrop(size),
             ]

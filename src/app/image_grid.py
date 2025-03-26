@@ -26,68 +26,64 @@ import argparse
 from mpl_toolkits.axes_grid1 import ImageGrid
 import math
 
-# from monai.transforms import (    
-#     AsChannelFirst,
-#     AddChannel,
-#     Compose,    
-#     RandFlip,
-#     RandRotate,
-#     CenterSpatialCrop,
-#     ScaleIntensityRange,
-#     RandAdjustContrast,
-#     RandGaussianNoise,
-#     RandGaussianSmooth
-# )
+def sample_balanced_data(df: pd.DataFrame, class_column='pred_class', min_samples=10, random_state=64):
+    # Determine the smallest class size in the 'pred_class' column
+    min_count = min(min_samples, df[class_column].value_counts().min())
+    
+    # Initialize a list to hold indices of the samples from each class
+    sampled_indices = []
+    
+    # Group the DataFrame by 'pred_class' and sample min_count rows from each group
+    for label, group in df.groupby(class_column):
+        sampled_group = group.sample(n=min_count, random_state=random_state)
+        sampled_indices.extend(sampled_group.index.tolist())
+    
+    # Subset the DataFrame and features array using the sampled indices
+    balanced_df = df.loc[sampled_indices].reset_index(drop=True)
+    
+    return balanced_df
 
 
 def main(args):
-    # if not os.path.exists(args.out):
-    #     os.makedirs(args.out)
 
     test_df = pd.read_parquet(args.csv)
 
-    clusters_range = [test_df[args.pred_column].min(), test_df[args.pred_column].max()]
-
-    num_images = args.col*args.row
-
-    for cl in range(clusters_range[0], clusters_range[1] + 1):
-
+    if not os.path.exists(args.out):
+        os.makedirs(args.out)
+    
+    for cl in range(test_df[args.pred_column].min(), test_df[args.pred_column].max() + 1):
 
         filtered_df = test_df.query('{pred_column} == {cl}'.format(pred_column=args.pred_column, cl=cl)).reset_index(drop=True)
 
-        filtered_df = filtered_df.sample(n=min(num_images, len(filtered_df))).reset_index(drop=True)
+        if len(filtered_df) > 0:
+        
+            filtered_df = filtered_df.sample(n=args.row*args.col)
 
-        imgs = []    
+            imgs = []    
 
-        # if not os.path.exists(os.path.join(args.out, str(cl))):
-        #     os.makedirs(os.path.join(args.out, str(cl)))
+            for idx, row in filtered_df.iterrows():
+                img_path = row[args.img_column]
+                img_path = os.path.join(args.mount_point, img_path)
 
-        for idx, row in filtered_df.iterrows():
-            img_path = row[args.img_column]    
-            img_path = os.path.join(args.mount_point, img_path)
+                img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))
 
-            img = sitk.GetArrayFromImage(sitk.ReadImage(img_path))
+                imgs.append(img)
 
-            imgs.append(img)
+            if len(imgs) > 0:
 
-            # out_name = os.path.join(args.out, str(cl), str(idx) + ".png")
+                fig = plt.figure(figsize=args.fig_size)
+                
+                grid = ImageGrid(fig, 111,  # similar to subplot(111)
+                    nrows_ncols=(args.row, args.col)
+                    )
 
-            # fig = plt.imshow(img, cmap='gray')
-            # plt.savefig(out_name)
+                for ax, im in zip(grid, imgs):
+                    ax.imshow(im, cmap='gray')
 
-        fig = plt.figure(figsize=args.fig_size)
-
-        grid = ImageGrid(fig, 111,  # similar to subplot(111)
-                 nrows_ncols=(args.row, args.col)
-                 )
-
-
-        for ax, im in zip(grid, imgs):        
-            ax.imshow(im, cmap='gray')
-
-        out_name = os.path.splitext(args.csv)[0] + "_cluster{cl}_image_grid.png".format(cl=cl)
-        print("Writing:", out_name)
-        fig.savefig(out_name) 
+                out_name = os.path.join(args.out, f"{cl}.png")
+                print("Writing:", out_name)
+                fig.savefig(out_name) 
+                plt.close(fig)
     
 
 
@@ -99,9 +95,11 @@ if __name__ == '__main__':
     parser.add_argument('--mount_point', type=str, help='Dataset mount point', default="./")
     parser.add_argument('--pred_column', type=str, help='Prediction/class column', default="pred_cluster")
     parser.add_argument('--img_column', type=str, help='Image column', default="img_path")
-    parser.add_argument('--row', type=int, help='Row length (number of images per row)', default=10)
-    parser.add_argument('--col', type=int, help='Col length (number of images per column)', default=10)    
-    parser.add_argument('--fig_size', nargs="+", type=int, help='Figure size', default=[24, 24])        
+    parser.add_argument('--row', type=int, help='number of rows', default=10)
+    parser.add_argument('--col', type=int, help='number of columns', default=10)
+    parser.add_argument('--fig_size', nargs="+", type=int, help='Figure size', default=[48, 48])   
+    parser.add_argument('--out', type=str, help='Output folder', default="./")
+         
 
     args = parser.parse_args()
 

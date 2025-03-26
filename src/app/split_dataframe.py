@@ -17,4 +17,4 @@ if __name__ == '__main__':
     if not os.path.exists(args.out):
         os.makedirs(args.out)
         
-    ddf.repartition(args.n).to_parquet(args.out)
+    ddf.repartition(npartitions=args.n).to_parquet(args.out)
