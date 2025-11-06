@@ -33,24 +33,31 @@ class Split(object):
 
             if not os.path.exists(out_dir):
                 os.makedirs(out_dir)
-        
+
+            if self.args.random > 0:
+                frame_indices = np.random.choice(img_np.shape[0], min(self.args.random, img_np.shape[0]), replace=False)
+            else:
+                frame_indices = range(img_np.shape[0])
+
             for idx, frame_np in enumerate(img_np):
 
-                if len(frame_np.shape) == 2:
-                    out_img = sitk.GetImageFromArray(frame_np)
-                elif len(frame_np.shape) == 3:
-                    out_img = sitk.GetImageFromArray(frame_np, isVector=True)
-                else:
-                    print("4D image?", file=sys.stderr)
-                    raise 
+                if (self.args.last_frame == 1 and idx == img_np.shape[0] - 1) or (idx in frame_indices and self.args.last_frame == 0):
 
-                out_img.SetSpacing(img.GetSpacing()[0:2])
-                out_img.SetOrigin(img.GetOrigin()[0:2])        
+                    if len(frame_np.shape) == 2:
+                        out_img = sitk.GetImageFromArray(frame_np)
+                    elif len(frame_np.shape) == 3:
+                        out_img = sitk.GetImageFromArray(frame_np, isVector=True)
+                    else:
+                        print("4D image?", file=sys.stderr)
+                        raise 
 
-                writer = sitk.ImageFileWriter()
-                writer.SetFileName(os.path.join(out_dir, str(idx) + ".nrrd"))
-                writer.UseCompressionOn()
-                writer.Execute(out_img)
+                    out_img.SetSpacing(img.GetSpacing()[0:2])
+                    out_img.SetOrigin(img.GetOrigin()[0:2])        
+
+                    writer = sitk.ImageFileWriter()
+                    writer.SetFileName(os.path.join(out_dir, str(idx) + ".nrrd"))
+                    writer.UseCompressionOn()
+                    writer.Execute(out_img)
 
 
 def main(args):
@@ -74,8 +81,6 @@ def main(args):
                 img_fn = row[args.img_column]
                 split.split_fn(img_fn)
 
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
@@ -84,6 +89,8 @@ if __name__ == "__main__":
     input_group.add_argument('--csv', type=str, help='Input csv file')
     parser.add_argument('--csv_root', type=str, help='Remove this root from filename. The rest will be used to create the output directory', default=None)
     parser.add_argument('--img_column', type=str, help='Input column name if using csv flag', default="file_path")
+    parser.add_argument('--last_frame', type=int, help='Last frame onely to split', default=0)
+    parser.add_argument('--random', type=int, help='Random frames to split', default=0)
     parser.add_argument('--out', type=str, help='Output directory', required=True)
     parser.add_argument('--type', type=str, help='Output type', default="ubyte")
     parser.add_argument('--use_multi', type=int, help='Use multi processing', default=0)

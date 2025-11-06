@@ -1,136 +1,137 @@
 import argparse
-
-import math
 import os
-import pandas as pd
-import numpy as np 
-
 import torch
-from loaders.ultrasound_dataset import USDataModule
-from transforms.ultrasound_transforms import USClassTrainTransforms, USClassEvalTransforms
+
+from loaders import ultrasound_dataset
+# from callbacks.logger import ImageLoggerLotusNeptune
+
 from nets import classification
+from callbacks import logger
 
-from pytorch_lightning import Trainer
-from pytorch_lightning.callbacks.early_stopping import EarlyStopping
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.strategies.ddp import DDPStrategy
-from pytorch_lightning.loggers import NeptuneLogger, TensorBoardLogger
+import lightning as L
 
-from sklearn.utils import class_weight
+from lightning import Trainer, seed_everything
+from lightning.pytorch.callbacks.early_stopping import EarlyStopping
+from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.strategies import DDPStrategy
+
+from lightning.pytorch.loggers import NeptuneLogger
 
 def main(args):
-    
-    # train_fn = os.path.join(args.mount_point, 'CSV_files', 'dataset_c_pairs_masked_resampled_256_spc075_uuids_study_uuid_train_train.csv')
-    # valid_fn = os.path.join(args.mount_point, 'CSV_files', 'dataset_c_pairs_masked_resampled_256_spc075_uuids_study_uuid_train_eval.csv')
-    # test_fn = os.path.join(args.mount_point, 'CSV_files', 'dataset_c_pairs_masked_resampled_256_spc075_uuids_study_uuid_test.csv')
 
-    # train_fn = os.path.join(args.mount_point, 'CSV_files', 'C1_C2_Annotated_Frames_resampled_256_spc075_uuids_study_uuid_train.csv')
-    # valid_fn = os.path.join(args.mount_point, 'CSV_files', 'C1_C2_Annotated_Frames_resampled_256_spc075_uuids_study_uuid_valid.csv')
-    # test_fn = os.path.join(args.mount_point, 'CSV_files', 'C1_C2_Annotated_Frames_resampled_256_spc075_uuids_study_uuid_test.csv')
-    # img_column='uuid_path'
-    # class_column='class'
+    deterministic = None
+    if args.seed_everything:
+        seed_everything(args.seed_everything, workers=True)
+        deterministic = True
 
-    if(os.path.splitext(args.csv_train)[1] == ".csv"):
-        df_train = pd.read_csv(os.path.join(args.mount_point, args.csv_train))    
-        df_val = pd.read_csv(os.path.join(args.mount_point, args.csv_valid))    
-        df_test = pd.read_csv(os.path.join(args.mount_point, args.csv_test))
-    else:
-        df_train = pd.read_parquet(os.path.join(args.mount_point, args.csv_train))    
-        df_val = pd.read_parquet(os.path.join(args.mount_point, args.csv_valid))    
-        df_test = pd.read_parquet(os.path.join(args.mount_point, args.csv_test))
+    NN = getattr(classification, args.nn)    
+    model = NN(**vars(args))
 
-    img_column=args.img_column
-    class_column=args.class_column
+    DM = getattr(ultrasound_dataset, args.data_module)    
 
-    unique_classes = np.sort(np.unique(df_train[class_column]))
-    unique_class_weights = np.array(class_weight.compute_class_weight(class_weight='balanced', classes=unique_classes, y=df_train[class_column]))
+    datamodule = DM(**vars(args))
 
-    class_replace = {}
-    for cn, cl in enumerate(unique_classes):
-        class_replace[cl] = cn
-    print(unique_classes, unique_class_weights, class_replace)    
-
-    usdata = USDataModule(df_train, df_val, df_test, batch_size=args.batch_size, num_workers=args.num_workers, img_column=img_column, class_column=class_column, train_transform=USClassTrainTransforms(256), valid_transform=USClassEvalTransforms(256), test_transform=USClassEvalTransforms(256))
-
+    callbacks = []
 
     checkpoint_callback = ModelCheckpoint(
         dirpath=args.out,
         filename='{epoch}-{val_loss:.2f}',
         save_top_k=2,
-        monitor='val_loss'
+        monitor='val_loss',
+        save_last=True
+        
     )
 
-    NN = getattr(classification, args.nn)
+    callbacks.append(checkpoint_callback)
 
-    args_params = vars(args)
-    args_params['class_weights'] = unique_class_weights
-    args_params['num_classes'] = len(unique_class_weights)
+    if args.monitor:
+        checkpoint_callback_d = ModelCheckpoint(
+            dirpath=args.out,
+            filename='{epoch}-{' + args.monitor + ':.2f}',
+            save_top_k=5,
+            monitor=args.monitor,
+            save_last=True
+            
+        )
 
-    model = NN(**args_params)
-
-    early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=30, verbose=True, mode="min")
+        callbacks.append(checkpoint_callback_d)
 
 
-    if args.tb_dir:
-        logger = TensorBoardLogger(save_dir=args.tb_dir, name=args.tb_name)    
-    elif args.neptune_tags:
-        logger = NeptuneLogger(
-            project='ImageMindAnalytics/Classification',
+    if args.use_early_stopping:
+        early_stop_callback = EarlyStopping(monitor="val_loss", min_delta=0.00, patience=args.patience, verbose=True, mode="min")
+        callbacks.append(early_stop_callback)
+
+    logger_neptune = None
+
+    if args.neptune_tags:
+        logger_neptune = NeptuneLogger(
+            project='ImageMindAnalytics/us-cl',
             tags=args.neptune_tags,
-            api_key=os.environ['NEPTUNE_API_TOKEN']
-        )        
+            api_key=os.environ['NEPTUNE_API_TOKEN'],
+            log_model_checkpoints=False
+        )
 
+    if args.logger:
+        LOGGER = getattr(logger, args.logger)    
+        image_logger = LOGGER(log_steps=args.image_log_steps)
+        callbacks.append(image_logger)
+    
     trainer = Trainer(
-        logger=logger,
+        logger=logger_neptune,
+        log_every_n_steps=args.log_steps,
         max_epochs=args.epochs,
-        callbacks=[early_stop_callback, checkpoint_callback],
-        devices=torch.cuda.device_count(), 
-        accelerator="gpu", 
-        strategy=DDPStrategy(find_unused_parameters=False)
+        max_steps=args.steps,
+        callbacks=callbacks,
+        accelerator='gpu', 
+        devices=torch.cuda.device_count(),
+        strategy=DDPStrategy(find_unused_parameters=args.find_unused_parameters),
+        deterministic=deterministic
+        # strategy=DDPStrategy(),
     )
-    trainer.fit(model, datamodule=usdata, ckpt_path=args.model)
-    trainer.test(datamodule=usdata)
+    
+    trainer.fit(model, datamodule=datamodule, ckpt_path=args.model)
+    trainer.test(model, datamodule=datamodule, ckpt_path='best')
 
 
 if __name__ == '__main__':
 
 
-    parser = argparse.ArgumentParser(description='Clasification Training')
-
-
-    input_group = parser.add_argument_group('Input')
-    input_group.add_argument('--model', help='Model path to continue training', type=str, default=None)
-    input_group.add_argument('--model_feat', help='Features model', type=str, default=None)
-    input_group.add_argument('--csv_train', required=True, type=str, help='Train CSV')
-    input_group.add_argument('--csv_valid', required=True, type=str, help='Valid CSV')
-    input_group.add_argument('--csv_test', required=True, type=str, help='Test CSV')
-    input_group.add_argument('--img_column', type=str, help='Name of column in CSV file', default='img_path')
-    input_group.add_argument('--class_column', type=str, help='Name of column in CSV file', default='class')
-    input_group.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
-    input_group.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")
-
-    log_group = parser.add_argument_group('Logging')
-    log_group.add_argument('--neptune_tags', help='Neptune tags', type=str, nargs="+", default=None)
-    log_group.add_argument('--tb_dir', help='Tensorboard output dir', type=str, default=None)
-    log_group.add_argument('--tb_name', help='Tensorboard experiment name', type=str, default="classification_efficientnet_b0")
+    parser = argparse.ArgumentParser(description='Classification training', add_help=False)
 
     hparams_group = parser.add_argument_group('Hyperparameters')
-    hparams_group.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='Learning rate')
-    hparams_group.add_argument('--weight_decay', help='Weight_decay for optimizer', type=float, default=0.01)    
-    hparams_group.add_argument('--batch_size', help='Batch size', type=int, default=256)
-    hparams_group.add_argument('--nn', help='Type of PL neural network', type=str, default="EfficientNet")
-    hparams_group.add_argument('--base_encoder', help='Type of torchvision neural network', type=str, default="efficientnet_b0")
-    
-    hparams_group.add_argument('--epochs', help='Max number of epochs', type=int, default=200)    
+    hparams_group.add_argument('--epochs', help='Max number of epochs', type=int, default=200)
+    hparams_group.add_argument('--patience', help='Max number of patience for early stopping', type=int, default=30)
+    hparams_group.add_argument('--steps', help='Max number of steps per epoch', type=int, default=-1)    
+    hparams_group.add_argument('--seed_everything', help='Seed everything for training', type=int, default=None)
+    hparams_group.add_argument('--find_unused_parameters', help='find_unused_parameters', type=int, default=0)
 
+    input_group = parser.add_argument_group('Input')
     
+    input_group.add_argument('--nn', help='Type of neural network', type=str, required=True)        
+    input_group.add_argument('--model', help='Model to continue training', type=str, default= None)    
 
+    input_group.add_argument('--data_module', help='Type of data module to use', type=str, required=True)            
+    
     output_group = parser.add_argument_group('Output')
-    output_group.add_argument('--out', help='Output', type=str, default="./")
+    output_group.add_argument('--out', help='Output directory', type=str, default="./")
+    output_group.add_argument('--use_early_stopping', help='Use early stopping criteria', type=int, default=1)
+    output_group.add_argument('--monitor', help='Additional metric to monitor to save checkpoints', type=str, default=None)
     
-    
+    log_group = parser.add_argument_group('Logging')
+    log_group.add_argument('--neptune_tags', help='Neptune tags', type=str, nargs="+", default=None)
+    log_group.add_argument('--logger', help='Neptune tags', type=str, default=None)
+    log_group.add_argument('--log_steps', help='Log every N steps', type=int, default=5)
+    log_group.add_argument('--image_log_steps', help='Log images every N steps', type=int, default=50)
 
+    args, unknownargs = parser.parse_known_args()
 
+    NN = getattr(classification, args.nn)    
+    NN.add_model_specific_args(parser)
+
+    data_module = getattr(ultrasound_dataset, args.data_module)
+    parser = data_module.add_data_specific_args(parser)
+
+    parser = argparse.ArgumentParser(parents=[parser])
     args = parser.parse_args()
 
     main(args)
