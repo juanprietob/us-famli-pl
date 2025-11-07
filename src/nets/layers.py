@@ -488,3 +488,26 @@ class OrientationPredictor(nn.Module):
         z = self.set_encoder(x)         # [B, D]
         R = self.fc(z).view(-1, 3, 3)   # [B, 3, 3]
         return R
+    
+class HeteroscedasticHead(nn.Module):
+    """
+    Final head for Gaussian NLL regression.
+    Predicts mean (mu) and log-variance (log_var) per sample.
+    """
+    def __init__(self, input_dim, hidden=128, activation=nn.ReLU):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden),
+            activation(),
+            nn.Linear(hidden, hidden),
+            activation(),
+        )
+        self.mu = nn.Linear(hidden, 1)
+        self.log_var = nn.Linear(hidden, 1)  # unconstrained; we’ll clamp
+
+    def forward(self, x):
+        h = self.net(x)
+        mu = self.mu(h).squeeze(-1)            # [B]
+        log_var = self.log_var(h).squeeze(-1)  # [B]
+        log_var = torch.clamp(log_var, min=-10.0, max=10.0)  # numerical safety
+        return mu, log_var

@@ -3,13 +3,15 @@ from torch import nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from .layers import TimeDistributed, AttentionChunk, MHABlock, SelfAttention, ProjectionHead
+from .layers import TimeDistributed, AttentionChunk, MHABlock, SelfAttention, ProjectionHead, HeteroscedasticHead
 
 import torchvision 
 from torchvision.transforms import v2
 
 
 from lightning.pytorch import LightningModule
+from lightning.pytorch.utilities import grad_norm
+
 
 from lightning.pytorch.loggers import NeptuneLogger
 from neptune.types import File
@@ -23,6 +25,25 @@ import math
 
 import numpy as np
 import itertools
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from math import pi
+
+def gaussian_nll(y, mu, log_var, reduction="mean"):
+    """
+    Gaussian Negative Log-Likelihood for heteroscedastic regression.
+    NLL = 0.5 * ( (y-mu)^2 / var + log_var )    (constant log(2π) omitted)
+    """
+    var = torch.exp(log_var)
+    nll = 0.5 * ((y - mu)**2 / var + log_var)
+    if reduction == "mean":
+        return nll.mean()
+    elif reduction == "sum":
+        return nll.sum()
+    return nll
+
 
 class EfwNet(LightningModule):
     def __init__(self, **kwargs):
@@ -39,17 +60,18 @@ class EfwNet(LightningModule):
         self.proj = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=self.hparams.embed_dim, activation=nn.PReLU)
         self.attn_chunk = AttentionChunk(input_dim=self.hparams.embed_dim, hidden_dim=64, chunks=self.hparams.n_chunks)
 
-        self.ln0 = nn.LayerNorm(self.hparams.embed_dim)
+        self.ln = nn.LayerNorm(self.hparams.embed_dim)
         self.mha = MHABlock(embed_dim=self.hparams.embed_dim, num_heads=self.hparams.num_heads, dropout=self.hparams.dropout, causal_mask=True, return_weights=False)
-        self.ln1 = nn.LayerNorm(self.hparams.embed_dim)
 
         self.dropout = nn.Dropout(self.hparams.dropout)
         
         self.attn = SelfAttention(input_dim=self.hparams.embed_dim, hidden_dim=64)
         self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=64, output_dim=1, activation=nn.PReLU)
+        # self.proj_final = HeteroscedasticHead(input_dim=self.hparams.embed_dim, hidden=64)
 
-        # self.loss_fn = nn.HuberLoss(delta=5.0)
-        self.loss_fn = nn.MSELoss()
+        self.loss_fn = nn.HuberLoss(delta=0.7)
+        # self.loss_fn = nn.MSELoss()
+        # self.loss_fn = gaussian_nll
         self.l1_fn = torch.nn.L1Loss()
         
         self.train_transform = v2.Compose(
@@ -83,9 +105,12 @@ class EfwNet(LightningModule):
         group.add_argument("--embed_dim", type=int, default=128, help='Embedding dimension')        
         group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
         group.add_argument("--tags", type=int, default=18, help='Number of sweep tags for the sequences, this will determine the second dimension of the 2D positional encoding')
-
-        group.add_argument("--output_dim", type=int, default=1, help='Output dimension')                     
         group.add_argument("--loss_reg_weight", type=float, default=1.0, help='Weight for regularization loss')
+        group.add_argument("--rho", type=float, default=0.1, help='Target sparsity for the regularization. Mean of scores should approach rho')
+        group.add_argument("--lam_kl", type=float, default=0.01, help='Weight for KL regularization loss, controlls the mean of the scores')
+        group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controlls pushing scores toward 0 or 1')
+
+        group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
 
         return parent_parser
     
@@ -122,42 +147,53 @@ class EfwNet(LightningModule):
         return optimizer
     
     def entropy_penalty(self, s, eps=1e-8):
-        H = -(s.clamp(eps,1-eps)*torch.log(s.clamp(eps,1-eps)) + (1-s.clamp(eps,1-eps))*torch.log(1-s.clamp(eps,1-eps)))
-        return H.mean()
-
-    def regularizer(self, scores, lam_l1=1e-3, lam_ent=1e-4):
-        return lam_l1 * scores.mean() + lam_ent * self.entropy_penalty(scores)
-
-    # def regularizer(self, scores, lam_l1=1e-3, lam_bi=1e-3):
-    #     return lam_l1 * scores.mean() + lam_bi * (scores * (1 - scores)).mean()
-    # def regularizer(self, scores, lam_l1=1e-3, lam_bi=1e-3):
-        
-    #     return 0.0
+        s = s.clamp(eps, 1 - eps)
+        H = -(s * torch.log(s) + (1 - s) * torch.log(1 - s))
+        return H.mean() 
     
-    def compute_loss(self, Y, X_hat, X_s=None, step="train", sync_dist=False):
-        
-        loss = self.loss_fn(X_hat, Y) 
-        
-        self.log(f"{step}_loss", loss, sync_dist=sync_dist)
+    def kl_to_bernoulli_mean(self, scores, rho=0.05, eps=1e-8):
+        # KL( Bern(mean(scores)) || Bern(rho) )
+        m = scores.clamp(eps, 1 - eps).mean()
+        rho_t = torch.tensor(rho, device=self.device)
+        kl = m * torch.log(m / rho_t) + (1 - m) * torch.log((1 - m) / (1 - rho_t))
+        return kl  
 
+    def regularizer(self, scores, rho=0.05, lam_kl=0.01, lam_ent=1.0):
+        # KL controls the mean, entropy pushes toward {0,1}
+        reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
+        reg += lam_ent * self.entropy_penalty(scores)
+        return reg
+
+    def compute_loss(self, Y, X_hat, X_s=None, step="train", sync_dist=False):
+
+        loss = self.loss_fn(Y, X_hat)
+
+        self.log(f"{step}_loss", loss, sync_dist=sync_dist)
+        
         l1 = self.l1_fn(X_hat, Y)
         self.log(f"{step}_l1", l1, sync_dist=sync_dist)
 
         if X_s is not None:
+
+            rho = self.hparams.rho             
+
             X_s = X_s.view(-1)
             self.log(f"{step}_scores/mean", X_s.mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/max", X_s.max(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores/mean_minus_rho", (X_s.mean() - rho).abs(), sync_dist=sync_dist)
 
-            reg_loss = self.regularizer(X_s)*self.hparams.loss_reg_weight
-            # Y_s = (Y > 0).float()
-            # reg_loss = ((X_s - Y_s)**2).mean()
+            reg_loss = self.regularizer(X_s, rho=rho, lam_kl=self.hparams.lam_kl, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
             loss = loss + reg_loss
 
         return loss
+    
+    def on_before_optimizer_step(self, optimizer):        
+        norms = grad_norm(self.mha, norm_type=2)
+        self.log_dict(norms)
 
     def training_step(self, train_batch, batch_idx):
         X = train_batch["img"]
@@ -184,7 +220,7 @@ class EfwNet(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, z_t_s = self(X, tags) 
+        x_hat, z_t_s = self(X, tags)
 
         self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, step="val", sync_dist=True)
 
@@ -223,6 +259,7 @@ class EfwNet(LightningModule):
         # tags shape torch.Size([2, 2])
         Nsweeps = x_sweeps.shape[1] # Number of sweeps -> T
 
+        z = []
         z_t = []
         z_t_s = []
 
@@ -232,23 +269,26 @@ class EfwNet(LightningModule):
             
             tag = sweeps_tags[:,n]    
 
-            z = self.encode(x_sweeps_n) # [BS, T, self.hparams.features]
+            z_ = self.encode(x_sweeps_n) # [BS, T, self.hparams.features]
 
-            z = self.proj(z) # [BS, T, self.hparams.embed_dim]
+            z_ = self.proj(z_) # [BS, T, self.hparams.embed_dim]
+
+            z.append(z_)
             
-            z_t_, z_t_s_ = self.attn_chunk(z) # [BS, self.hparams.n_chunks, self.hparams.embed_dim]
+            z_t_, z_t_s_ = self.attn_chunk(z_) # [BS, self.hparams.n_chunks, self.hparams.embed_dim]
 
             p_enc_z = self.p_encoding_z[tag]
             
             z_t_ = z_t_ + p_enc_z
+            z_t_ = self.dropout(z_t_)
 
-            z_t_ = z_t_ + self.mha(self.ln0(z_t_)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
-            z_t_ = self.ln1(z_t_)
+            z_t_ = self.mha(self.ln(z_t_)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
 
             z_t.append(z_t_)
             z_t_s.append(z_t_s_)
 
 
+        z = torch.stack(z, dim=1)  # [BS, N_sweeps, T, self.hparams.embed_dim]
         z_t = torch.stack(z_t, dim=1)  # [BS, N_sweeps, self.hparams.n_chunks, self.hparams.embed_dim]
         z_t_s = torch.stack(z_t_s, dim=1)  # [BS, N_sweeps, T, self.hparams.n_chunks]
 
@@ -257,6 +297,7 @@ class EfwNet(LightningModule):
 
         z_t, z_s = self.attn(z_t, z_t)
         
+        # x_hat_mu, x_hat_log_var = self.proj_final(z_t)
         x_hat = self.proj_final(z_t)
 
         return x_hat, z_t_s
