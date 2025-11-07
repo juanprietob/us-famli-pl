@@ -74,6 +74,7 @@ class EfwNet(LightningModule):
         # self.loss_fn = gaussian_nll
         self.l1_fn = torch.nn.L1Loss()
         
+
         self.train_transform = v2.Compose(
             [
                 v2.RandomHorizontalFlip(),                
@@ -160,7 +161,8 @@ class EfwNet(LightningModule):
 
     def regularizer(self, scores, rho=0.05, lam_kl=0.01, lam_ent=1.0):
         # KL controls the mean, entropy pushes toward {0,1}
-        reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
+        # reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
+        reg = lam_kl * (scores.mean() - rho) ** 2
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
@@ -175,16 +177,13 @@ class EfwNet(LightningModule):
 
         if X_s is not None:
 
-            rho = self.hparams.rho             
-
             X_s = X_s.view(-1)
             self.log(f"{step}_scores/mean", X_s.mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/max", X_s.max(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
-            self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)
-            self.log(f"{step}_scores/mean_minus_rho", (X_s.mean() - rho).abs(), sync_dist=sync_dist)
+            self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)            
 
-            reg_loss = self.regularizer(X_s, rho=rho, lam_kl=self.hparams.lam_kl, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
+            reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_kl=self.hparams.lam_kl, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
             loss = loss + reg_loss
