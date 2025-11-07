@@ -108,8 +108,8 @@ class EfwNet(LightningModule):
         group.add_argument("--tags", type=int, default=18, help='Number of sweep tags for the sequences, this will determine the second dimension of the 2D positional encoding')
         group.add_argument("--loss_reg_weight", type=float, default=1.0, help='Weight for regularization loss')
         group.add_argument("--rho", type=float, default=0.1, help='Target sparsity for the regularization. Mean of scores should approach rho')
-        group.add_argument("--lam_kl", type=float, default=0.01, help='Weight for KL regularization loss, controlls the mean of the scores')
-        group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controlls pushing scores toward 0 or 1')
+        group.add_argument("--lam_ms", type=float, default=1.0, help='Weight for mean sparsity controls the mean of the scores')
+        group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
 
@@ -159,10 +159,10 @@ class EfwNet(LightningModule):
         kl = m * torch.log(m / rho_t) + (1 - m) * torch.log((1 - m) / (1 - rho_t))
         return kl  
 
-    def regularizer(self, scores, rho=0.05, lam_kl=0.01, lam_ent=1.0):
+    def regularizer(self, scores, rho=0.05, lam_ms=1.0, lam_ent=1.0):
         # KL controls the mean, entropy pushes toward {0,1}
         # reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
-        reg = lam_kl * (scores.mean() - rho) ** 2
+        reg = lam_ms * (scores.mean() - rho) ** 2
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
@@ -183,7 +183,7 @@ class EfwNet(LightningModule):
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)            
 
-            reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_kl=self.hparams.lam_kl, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
+            reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
             loss = loss + reg_loss
