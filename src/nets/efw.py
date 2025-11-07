@@ -162,7 +162,10 @@ class EfwNet(LightningModule):
     def regularizer(self, scores, rho=0.05, lam_ms=1.0, lam_ent=1.0):
         # KL controls the mean, entropy pushes toward {0,1}
         # reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
-        reg = lam_ms * (scores.mean() - rho) ** 2
+        topk = torch.topk(scores, k=int(rho * scores.numel())).values        
+        bottomk = torch.topk(-scores, k=int((1 - rho) * scores.numel())).values
+
+        reg = lam_ms * ((1.0 - topk.mean()) ** 2 + (bottomk.mean()) ** 2)
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
