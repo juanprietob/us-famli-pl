@@ -164,7 +164,7 @@ class EfwNet(LightningModule):
 
     def regularizer(self, scores, rho=0.05, lam_ms=1.0, lam_ent=1.0):
         # lam_ms controls the mean, entropy pushes toward {0,1}
-        reg = lam_ms * (rho - scores.mean())
+        reg = lam_ms * (scores.mean() - rho)**2
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
