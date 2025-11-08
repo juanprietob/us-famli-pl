@@ -60,8 +60,9 @@ class EfwNet(LightningModule):
         self.proj = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=self.hparams.embed_dim, activation=nn.PReLU)
         self.attn_chunk = AttentionChunk(input_dim=self.hparams.embed_dim, hidden_dim=64, chunks=self.hparams.n_chunks)
 
-        self.ln = nn.LayerNorm(self.hparams.embed_dim)
+        self.ln0 = nn.LayerNorm(self.hparams.embed_dim)
         self.mha = MHABlock(embed_dim=self.hparams.embed_dim, num_heads=self.hparams.num_heads, dropout=self.hparams.dropout, causal_mask=True, return_weights=False)
+        self.ln1 = nn.LayerNorm(self.hparams.embed_dim)
 
         self.dropout = nn.Dropout(self.hparams.dropout)
         
@@ -285,10 +286,10 @@ class EfwNet(LightningModule):
 
             p_enc_z = self.p_encoding_z[tag]
             
-            z_t_ = z_t_ + p_enc_z
+            
             z_t_ = self.dropout(z_t_)
-
-            z_t_ = self.mha(self.ln(z_t_)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
+            z_t_ = z_t_ + self.mha(self.ln0(z_t_ + p_enc_z)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
+            z_t_ = self.ln1(z_t_)
 
             z_t.append(z_t_)
             z_t_s.append(z_t_s_)
