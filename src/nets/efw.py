@@ -110,6 +110,7 @@ class EfwNet(LightningModule):
         group.add_argument("--rho", type=float, default=0.1, help='Target sparsity for the regularization. Mean of scores should approach rho')
         group.add_argument("--lam_ms", type=float, default=1.0, help='Weight for mean sparsity controls the mean of the scores')
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
+        group.add_argument("--warmup_epochs", type=int, default=10, help='Number of epochs to warmup the scores regularization')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
 
@@ -166,7 +167,7 @@ class EfwNet(LightningModule):
         bottomk = torch.topk(-scores, k=int((1 - rho) * scores.numel())).values
 
         reg = lam_ms * ((1.0 - topk.mean()) ** 2 + (bottomk.mean()) ** 2)
-        reg += lam_ent * self.entropy_penalty(scores)
+        # reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
     def compute_loss(self, Y, X_hat, X_s=None, step="train", sync_dist=False):
@@ -186,7 +187,10 @@ class EfwNet(LightningModule):
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)            
 
-            reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
+            if self.current_epoch < self.hparams.warmup_epochs:
+                reg_loss = 0
+            else:
+                reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
             loss = loss + reg_loss
