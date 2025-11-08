@@ -99,7 +99,7 @@ class EfwNet(LightningModule):
         
         # Image Encoder parameters                 
         group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
-        group.add_argument("--time_dim_train", type=int, nargs="+", default=(32, 64), help='Range of time dimensions for training')
+        group.add_argument("--time_dim_train", type=int, nargs="+", default=None, help='Range of time dimensions for training')
         group.add_argument("--n_chunks_e", type=int, default=2, help='Number of chunks in the encoder stage to reduce memory usage')
         group.add_argument("--n_chunks", type=int, default=16, help='Number of outputs in the time dimension, this will determine the first dimension of the 2D positional encoding')
         group.add_argument("--num_heads", type=int, default=8, help='Number of heads for multi_head attention')
@@ -108,11 +108,12 @@ class EfwNet(LightningModule):
         group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
         group.add_argument("--tags", type=int, default=18, help='Number of sweep tags for the sequences, this will determine the second dimension of the 2D positional encoding')
         group.add_argument("--loss_reg_weight", type=float, default=1.0, help='Weight for regularization loss')
-        group.add_argument("--rho", type=float, nargs="+", default=(0.5, 0.1), help='Target sparsity for the regularization. Mean of scores should approach rho')
-        group.add_argument("--rho_steps", type=int, default=5, help='Number of steps to go from rho[0] to rho[1]')
-        group.add_argument("--lam_ms", type=float, default=0.001, help='Weight for mean sparsity controls the mean of the scores')
+        
+        group.add_argument("--rho", type=float, nargs="+", default=(0.6, 0.1), help='Target sparsity for the regularization. Mean of scores should approach rho')
+        group.add_argument("--rho_steps", type=int, default=20, help='Number of steps to go from rho[0] to rho[1]')
+        group.add_argument("--lam_ms", type=float, default=0.1, help='Weight for mean sparsity controls the mean of the scores')
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
-        group.add_argument("--warmup_epochs", type=int, default=10, help='Number of epochs to warmup the scores regularization')
+        group.add_argument("--warmup_epochs", type=int, default=2, help='Number of epochs to warmup the scores regularization')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
 
@@ -206,10 +207,11 @@ class EfwNet(LightningModule):
         Y = train_batch["efw"]
         
         batch_size, NS, C, T, H, W = X.shape
-        time_r = torch.randint(low=self.hparams.time_dim_train[0], high=self.hparams.time_dim_train[1], size=(1,)).item()
-        time_ridx = torch.randint(low=0, high=T, size=(time_r,))
-        time_ridx = time_ridx.sort().values
-        X = X[:, :, :, time_ridx, :, :].contiguous()
+        if self.hparams.time_dim_train is not None:
+            time_r = torch.randint(low=self.hparams.time_dim_train[0], high=self.hparams.time_dim_train[1], size=(1,)).item()
+            time_ridx = torch.randint(low=0, high=T, size=(time_r,))
+            time_ridx = time_ridx.sort().values
+            X = X[:, :, :, time_ridx, :, :].contiguous()            
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
