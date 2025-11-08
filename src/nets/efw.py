@@ -108,7 +108,8 @@ class EfwNet(LightningModule):
         group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
         group.add_argument("--tags", type=int, default=18, help='Number of sweep tags for the sequences, this will determine the second dimension of the 2D positional encoding')
         group.add_argument("--loss_reg_weight", type=float, default=1.0, help='Weight for regularization loss')
-        group.add_argument("--rho", type=float, default=0.1, help='Target sparsity for the regularization. Mean of scores should approach rho')
+        group.add_argument("--rho", type=float, nargs="+", default=(0.5, 0.1), help='Target sparsity for the regularization. Mean of scores should approach rho')
+        group.add_argument("--rho_steps", type=int, default=5, help='Number of steps to go from rho[0] to rho[1]')
         group.add_argument("--lam_ms", type=float, default=0.001, help='Weight for mean sparsity controls the mean of the scores')
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
         group.add_argument("--warmup_epochs", type=int, default=10, help='Number of epochs to warmup the scores regularization')
@@ -187,7 +188,8 @@ class EfwNet(LightningModule):
             if self.current_epoch < self.hparams.warmup_epochs:
                 reg_loss = 0
             else:
-                reg_loss = self.regularizer(X_s, rho=self.hparams.rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
+                rho = self.hparams.rho[0] + (self.hparams.rho[1] - self.hparams.rho[0]) * min((self.current_epoch - self.hparams.warmup_epochs) / self.hparams.rho_steps, 1.0)
+                reg_loss = self.regularizer(X_s, rho=rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
             loss = loss + reg_loss
