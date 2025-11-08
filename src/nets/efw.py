@@ -99,7 +99,7 @@ class EfwNet(LightningModule):
         
         # Image Encoder parameters                 
         group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
-        group.add_argument("--time_dim_train", type=int, nargs="+", default=(64, 96), help='Range of time dimensions for training')
+        group.add_argument("--time_dim_train", type=int, nargs="+", default=(32, 64), help='Range of time dimensions for training')
         group.add_argument("--n_chunks_e", type=int, default=2, help='Number of chunks in the encoder stage to reduce memory usage')
         group.add_argument("--n_chunks", type=int, default=16, help='Number of outputs in the time dimension, this will determine the first dimension of the 2D positional encoding')
         group.add_argument("--num_heads", type=int, default=8, help='Number of heads for multi_head attention')
@@ -109,7 +109,7 @@ class EfwNet(LightningModule):
         group.add_argument("--tags", type=int, default=18, help='Number of sweep tags for the sequences, this will determine the second dimension of the 2D positional encoding')
         group.add_argument("--loss_reg_weight", type=float, default=1.0, help='Weight for regularization loss')
         group.add_argument("--rho", type=float, default=0.1, help='Target sparsity for the regularization. Mean of scores should approach rho')
-        group.add_argument("--lam_ms", type=float, default=1.0, help='Weight for mean sparsity controls the mean of the scores')
+        group.add_argument("--lam_ms", type=float, default=0.001, help='Weight for mean sparsity controls the mean of the scores')
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
         group.add_argument("--warmup_epochs", type=int, default=10, help='Number of epochs to warmup the scores regularization')
 
@@ -162,13 +162,9 @@ class EfwNet(LightningModule):
         return kl  
 
     def regularizer(self, scores, rho=0.05, lam_ms=1.0, lam_ent=1.0):
-        # KL controls the mean, entropy pushes toward {0,1}
-        # reg = lam_kl * self.kl_to_bernoulli_mean(scores, rho=rho)
-        topk = torch.topk(scores, k=int(rho * scores.numel())).values        
-        bottomk = torch.topk(-scores, k=int((1 - rho) * scores.numel())).values
-
-        reg = lam_ms * ((1.0 - topk.mean()) ** 2 + (bottomk.mean()) ** 2)
-        # reg += lam_ent * self.entropy_penalty(scores)
+        # lam_ms controls the mean, entropy pushes toward {0,1}
+        reg = lam_ms * (rho - scores.mean())
+        reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
     def compute_loss(self, Y, X_hat, X_s=None, step="train", sync_dist=False):
