@@ -193,7 +193,9 @@ class EfwNet(LightningModule):
                 reg_loss = self.regularizer(X_s, rho=rho, lam_ms=self.hparams.lam_ms, lam_ent=self.hparams.lam_ent)*self.hparams.loss_reg_weight
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
-            loss = loss + reg_loss
+
+            if step == "train":
+                loss = loss + reg_loss
 
         return loss
     
