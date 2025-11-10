@@ -24,8 +24,7 @@ def main(args):
 
     DM = getattr(ultrasound_dataset, model.hparams.data_module)    
 
-    model.hparams.csv_test = '/mnt/raid/C1_ML_Analysis/CSV_files/efw_2025-10-31_test.csv'
-    model.hparams.num_frames_test = 128
+    model.hparams.csv_test = args.csv
     datamodule = DM(**model.hparams)
 
     logger_neptune = None
@@ -53,13 +52,11 @@ if __name__ == '__main__':
 
     input_group = parser.add_argument_group('Input')
 
+    input_group.add_argument('--csv', help='CSV file path', type=str, default='/mnt/raid/C1_ML_Analysis/CSV_files/efw_2025-10-31_test.csv')
     input_group.add_argument('--nn', help='Type of neural network', type=str, required=True)
     input_group.add_argument('--model', help='Model for testing', type=str, default=None)
 
     input_group.add_argument('--neptune_tags', help='Neptune tags for logging', type=str, nargs='+', default=None)
-    
-    output_group = parser.add_argument_group('Output')
-    output_group.add_argument('--out', help='Output directory', type=str, default="./")
     
     args = parser.parse_args()
 

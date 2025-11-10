@@ -48,7 +48,7 @@ def main(args):
         checkpoint_callback_d = ModelCheckpoint(
             dirpath=args.out,
             filename='{epoch}-{' + args.monitor + ':.2f}',
-            save_top_k=5,
+            save_top_k=2,
             monitor=args.monitor,
             save_last=True
             
