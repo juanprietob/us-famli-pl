@@ -913,7 +913,10 @@ class USDatasetBlindSweepWTag(Dataset):
             # except Exception as e:
             #     print(e, file=sys.stderr)
 
-        ret_dict["img"] = torch.stack(imgs)
+        if len(imgs) > 0 and self.num_frames > 0:
+            ret_dict["img"] = torch.stack(imgs)
+        else:
+            ret_dict["img"] = imgs
 
         if self.tag_column:
             ret_dict["tag"] = torch.tensor(tags, dtype=torch.long)

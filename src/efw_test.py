@@ -1,19 +1,10 @@
 import argparse
 import os
-import torch
 
 from loaders import ultrasound_dataset
-# from callbacks.logger import ImageLoggerLotusNeptune
 
 from nets import efw
-from callbacks import logger
-
-import lightning as L
-
-from lightning import Trainer, seed_everything
-from lightning.pytorch.callbacks.early_stopping import EarlyStopping
-from lightning.pytorch.callbacks import ModelCheckpoint
-from lightning.pytorch.strategies import DDPStrategy
+from lightning import Trainer
 
 from lightning.pytorch.loggers import NeptuneLogger
 
@@ -35,15 +26,6 @@ def main(args):
             api_key=os.environ['NEPTUNE_API_TOKEN'],
             log_model_checkpoints=False
         )
-    
-    trainer = Trainer(
-        logger=logger_neptune,
-        accelerator='gpu', 
-        devices=torch.cuda.device_count(),
-    )
-    
-    trainer.test(model, datamodule=datamodule)
-
 
 if __name__ == '__main__':
 

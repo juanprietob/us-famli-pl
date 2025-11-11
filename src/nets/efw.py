@@ -15,21 +15,18 @@ from lightning.pytorch.utilities import grad_norm
 
 from lightning.pytorch.loggers import NeptuneLogger
 from neptune.types import File
+from torchmetrics.aggregation import CatMetric
+
 
 
 import matplotlib.pyplot as plt
-
-import os
-import json
 import math
 
 import numpy as np
-import itertools
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from math import pi
 
 def gaussian_nll(y, mu, log_var, reduction="mean"):
     """
@@ -88,6 +85,8 @@ class EfwNet(LightningModule):
             ]
         )
 
+        # self.all2iq3 = torch.jit.load("/mnt/famli_netapp_shared/C1_ML_Analysis/trained_models/cut/all2iq3_v1_epoch=23-val_loss=5.75.pt")
+        # self.all2iq3.eval()
 
     @staticmethod
     def add_model_specific_args(parent_parser):
@@ -217,7 +216,7 @@ class EfwNet(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, z_t_s = self(self.train_transform(X), tags)
+        x_hat, z_t_s, z_c_s = self(self.train_transform(X), tags)
 
         return self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, step="train")
 
@@ -229,7 +228,7 @@ class EfwNet(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, z_t_s = self(X, tags)
+        x_hat, z_t_s, z_c_s = self(X, tags)
 
         self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, step="val", sync_dist=True)
 
@@ -240,25 +239,36 @@ class EfwNet(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, z_t_s = self(X, tags)
+        x_hat, z_t_s, z_c_s = self(X, tags)
 
         self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, step="test", sync_dist=True)
 
-    def encode(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def encode(self, x: torch.Tensor, tag: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
         """
-        Forwards an image through the spatial encoder, obtaining the latent mean and sigma representations.
+        Forwards an image through the spatial encoder, obtaining the latent
 
         Args:
             x: BxCx[SPATIAL DIMS] tensor
 
         """
-        # z = []
-        # for x_chunk in x.tensor_split(self.hparams.n_chunks_e, dim=1):            
-        #     z.append(self.encoder(x_chunk))
-        # z = torch.cat(z, dim=1)
+        z_ = self.encoder(x)
+        z_ = self.proj(z_) # [BS, T, self.hparams.embed_dim]
+            
+        z_t_, z_t_s_ = self.attn_chunk(z_) # [BS, self.hparams.n_chunks, self.hparams.embed_dim]
 
-        return self.encoder(x)
+        p_enc_z = self.p_encoding_z[tag]
+        
+        z_t_ = self.dropout(z_t_)
+        z_t_ = z_t_ + self.mha(self.ln0(z_t_ + p_enc_z)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
+        z_t_ = self.ln1(z_t_)
+
+        return z_, z_t_, z_t_s_
+    
+    def predict(self, z_t: torch.Tensor) -> torch.Tensor:
+        z_t, z_s = self.attn(z_t, z_t)
+        x_hat = self.proj_final(z_t)
+        return x_hat, z_s
 
     def forward(self, x_sweeps: torch.tensor, sweeps_tags: torch.tensor):
         
@@ -274,25 +284,12 @@ class EfwNet(LightningModule):
 
         for n in range(Nsweeps):
 
-            x_sweeps_n = x_sweeps[:, n, :, :, :, :] # [BS, T, C, H, W]
-            
+            x_sweeps_n = x_sweeps[:, n, :, :, :, :] # [BS, T, C, H, W]            
             tag = sweeps_tags[:,n]    
 
-            z_ = self.encode(x_sweeps_n) # [BS, T, self.hparams.features]
-
-            z_ = self.proj(z_) # [BS, T, self.hparams.embed_dim]
+            z_, z_t_, z_t_s_ = self.encode(x_sweeps_n, tag) # [BS, T, self.hparams.features]
 
             z.append(z_)
-            
-            z_t_, z_t_s_ = self.attn_chunk(z_) # [BS, self.hparams.n_chunks, self.hparams.embed_dim]
-
-            p_enc_z = self.p_encoding_z[tag]
-            
-            
-            z_t_ = self.dropout(z_t_)
-            z_t_ = z_t_ + self.mha(self.ln0(z_t_ + p_enc_z)) #[BS, self.hparams.n_chunks, self.hparams.embed_dim]
-            z_t_ = self.ln1(z_t_)
-
             z_t.append(z_t_)
             z_t_s.append(z_t_s_)
 
@@ -304,9 +301,6 @@ class EfwNet(LightningModule):
         z_t = z_t.view(batch_size, -1, self.hparams.embed_dim)  # [BS, N_s*n_chunks, self.hparams.embed_dim]
         z_t_s = z_t_s.view(batch_size, -1)  # [BS, N_s*n_chunks]
 
-        z_t, z_s = self.attn(z_t, z_t)
-        
-        # x_hat_mu, x_hat_log_var = self.proj_final(z_t)
-        x_hat = self.proj_final(z_t)
+        x_hat, z_c_s = self.predict(z_t)
 
-        return x_hat, z_t_s
+        return x_hat, z_t_s, z_c_s
