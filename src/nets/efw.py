@@ -67,8 +67,8 @@ class EfwNet(LightningModule):
         self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=64, output_dim=1, activation=nn.PReLU)
         # self.proj_final = HeteroscedasticHead(input_dim=self.hparams.embed_dim, hidden=64)
 
-        # self.loss_fn = nn.HuberLoss(delta=0.7)
-        self.loss_fn = nn.MSELoss()
+        self.loss_fn = nn.HuberLoss(delta=self.hparams.huber_delta)
+        # self.loss_fn = nn.MSELoss()
         # self.loss_fn = nn.MSELoss()
         # self.loss_fn = gaussian_nll
         self.l1_fn = torch.nn.L1Loss()
@@ -96,6 +96,7 @@ class EfwNet(LightningModule):
         group.add_argument("--lr", type=float, default=1e-4)
         group.add_argument("--betas", type=float, nargs="+", default=(0.9, 0.999), help='Betas for Adam optimizer')
         group.add_argument('--weight_decay', help='Weight decay for optimizer', type=float, default=1e-5)
+        group.add_argument('--huber_delta', help='Delta for Huber loss', type=float, default=0.5)
         
         # Image Encoder parameters                 
         group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
@@ -113,7 +114,7 @@ class EfwNet(LightningModule):
         group.add_argument("--rho_steps", type=int, default=20, help='Number of steps to go from rho[0] to rho[1]')
         group.add_argument("--lam_ms", type=float, default=0.1, help='Weight for mean sparsity controls the mean of the scores')
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
-        group.add_argument("--warmup_epochs", type=int, default=2, help='Number of epochs to warmup the scores regularization')
+        group.add_argument("--warmup_epochs", type=int, default=-1, help='Number of epochs to warmup the scores regularization')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
 
@@ -169,7 +170,7 @@ class EfwNet(LightningModule):
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
-    def compute_loss(self, Y, X_hat, X_s=None, step="train", sync_dist=False):
+    def compute_loss(self, Y, X_hat, X_s=None, X_s_ac=None, Y_s_ac=None, step="train", sync_dist=False):
 
         loss = self.loss_fn(Y, X_hat)
 
@@ -186,7 +187,7 @@ class EfwNet(LightningModule):
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)            
 
-            if self.current_epoch < self.hparams.warmup_epochs:
+            if self.hparams.warmup_epochs < 0 or self.current_epoch < self.hparams.warmup_epochs:
                 reg_loss = 0
             else:
                 rho = self.hparams.rho[0] + (self.hparams.rho[1] - self.hparams.rho[0]) * min((self.current_epoch - self.hparams.warmup_epochs) / self.hparams.rho_steps, 1.0)
@@ -196,6 +197,16 @@ class EfwNet(LightningModule):
 
             if step == "train":
                 loss = loss + reg_loss
+
+        if X_s_ac is not None and Y_s_ac is not None:
+            loss_ac = self.l1_fn(Y_s_ac, X_s_ac)
+            self.log(f"{step}_loss_ac", loss_ac, sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/mean", X_s_ac.mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/max", X_s_ac.max(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/s>=0.9", (X_s_ac >= 0.9).float().mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/s>=0.5", (X_s_ac >= 0.5).float().mean(), sync_dist=sync_dist)
+            if step == "train":
+                loss = loss + loss_ac
 
         return loss
     
@@ -218,6 +229,19 @@ class EfwNet(LightningModule):
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
         x_hat, z_t_s, z_c_s = self(self.train_transform(X), tags)
+
+        if 'img_ac' in train_batch:
+            X_ac = train_batch["img_ac"]
+            tags_ac = train_batch["tag_ac"]
+            Y_ac = train_batch["score_ac"]
+            
+            X_ac = X_ac.unsqueeze(1).permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
+            tags_ac = tags_ac.unsqueeze(1)
+
+            x_hat_ac, z_t_s_ac, z_c_s_ac = self(self.train_transform(X_ac), tags_ac)            
+
+            return self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, X_s_ac=z_t_s_ac, Y_s_ac=Y_ac,step="train")
+            
 
         return self.compute_loss(Y=Y, X_hat=x_hat, X_s=z_t_s, step="train")
 

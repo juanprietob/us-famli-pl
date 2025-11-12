@@ -750,7 +750,7 @@ class USZDataModule(LightningDataModule):
     
 
 class USDatasetBlindSweepWTag(Dataset):
-    def __init__(self, df, mount_point = "./", img_column='file_path', ga_column=None, efw_column=None, tag_column=None, class_column=None, frame_column=None, presentation_column=None, transform=None, id_column='study_id', max_sweeps=3, num_frames=96):
+    def __init__(self, df, mount_point = "./", img_column='file_path', ga_column=None, efw_column=None, tag_column=None, class_column=None, frame_column=None, presentation_column=None, transform=None, id_column='study_id', max_sweeps=3, num_frames=96, csv_train_ac=None):
         
         self.df = df
         self.mount_point = mount_point
@@ -787,6 +787,16 @@ class USDatasetBlindSweepWTag(Dataset):
             'HL': 2,
             'CRL': 3
         }
+        self.ds_ac = None
+        if csv_train_ac:
+            self.df_train_ac = pd.read_csv(csv_train_ac)
+            frame_labels_dict = {
+                'low_visible': 0.25,
+                'high_visible': 0.8,
+                'low_measurable': 1.0,
+                'high_measurable': 1.0
+            }
+            self.ds_ac = USAnnotatedBlindSweep(self.df_train_ac, mount_point=mount_point, num_frames=num_frames, transform=transform, frame_labels_dict=frame_labels_dict)
 
     def __len__(self):
         return len(self.keys)
@@ -818,6 +828,14 @@ class USDatasetBlindSweepWTag(Dataset):
                 row = df_group.iloc[0]
                 efw = row[self.efw_column]
                 ret_dict["efw"] = torch.tensor([efw], dtype=torch.float32)/1000.0
+
+            if self.ds_ac is not None:
+                # find a random AC sweep from the training set
+                rand_idx = torch.randint(low=0, high=len(self.ds_ac), size=(1,)).item()
+                ac_sweep = self.ds_ac[rand_idx]
+                ret_dict["img_ac"] = ac_sweep["img"]
+                ret_dict["tag_ac"] = ac_sweep["tag"]
+                ret_dict["score_ac"] = ac_sweep["class"]
 
             return ret_dict
 
@@ -955,6 +973,7 @@ class USDataModuleBlindSweepWTag(LightningDataModule):
         group.add_argument('--csv_train', type=str, default=None, required=True)
         group.add_argument('--csv_valid', type=str, default=None, required=True)
         group.add_argument('--csv_test', type=str, default=None, required=True)
+        group.add_argument('--csv_train_ac', type=str, default=None)
         group.add_argument('--num_frames', type=int, default=128)
         group.add_argument('--num_frames_val', type=int, default=-1)
         group.add_argument('--num_frames_test', type=int, default=-1)
@@ -967,7 +986,7 @@ class USDataModuleBlindSweepWTag(LightningDataModule):
     def setup(self, stage=None):
 
         # Assign train/val datasets for use in dataloaders
-        self.train_ds = USDatasetBlindSweepWTag(self.df_train, mount_point=self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, ga_column=self.hparams.ga_column, id_column=self.hparams.id_column, frame_column=self.hparams.frame_column, class_column=self.hparams.class_column, presentation_column=self.hparams.presentation_column, efw_column=self.hparams.efw_column, max_sweeps=self.hparams.max_sweeps, transform=self.train_transform, num_frames=self.hparams.num_frames)
+        self.train_ds = USDatasetBlindSweepWTag(self.df_train, mount_point=self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, ga_column=self.hparams.ga_column, id_column=self.hparams.id_column, frame_column=self.hparams.frame_column, class_column=self.hparams.class_column, presentation_column=self.hparams.presentation_column, efw_column=self.hparams.efw_column, max_sweeps=self.hparams.max_sweeps, transform=self.train_transform, num_frames=self.hparams.num_frames, csv_train_ac=self.hparams.csv_train_ac)
         self.val_ds = USDatasetBlindSweepWTag(self.df_val, mount_point=self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, ga_column=self.hparams.ga_column, id_column=self.hparams.id_column, frame_column=self.hparams.frame_column, class_column=self.hparams.class_column, presentation_column=self.hparams.presentation_column, efw_column=self.hparams.efw_column, max_sweeps=-1, transform=self.valid_transform, num_frames=self.hparams.num_frames_val)
         self.test_ds = USDatasetBlindSweepWTag(self.df_test, mount_point=self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, ga_column=self.hparams.ga_column, id_column=self.hparams.id_column, frame_column=self.hparams.frame_column, class_column=self.hparams.class_column, presentation_column=self.hparams.presentation_column, efw_column=self.hparams.efw_column, max_sweeps=-1, transform=self.test_transform, num_frames=self.hparams.num_frames_test)
 
@@ -982,7 +1001,7 @@ class USDataModuleBlindSweepWTag(LightningDataModule):
 
 
 class USAnnotatedBlindSweep(Dataset):
-    def __init__(self, df, mount_point = "./", img_column='file_path', tag_column='tag', frame_column="frame_index", frame_label="annotation_label", id_column='annotation_id', num_frames=64, transform=None):
+    def __init__(self, df, mount_point = "./", img_column='file_path', tag_column='tag', frame_column="frame_index", frame_label="annotation_label", id_column='annotation_id', num_frames=64, transform=None, frame_labels_dict=None):
         
         self.df_frames = df        
         self.mount_point = mount_point
@@ -1002,12 +1021,15 @@ class USAnnotatedBlindSweep(Dataset):
 
         self.max_tag = np.max(list(self.tags_dict.values())) + 1
 
-        self.frame_labels_dict = {
-            'low_visible': 1,
-            'high_visible': 2,
-            'low_measurable': 3,
-            'high_measurable': 4
-        }
+        if frame_labels_dict:
+            self.frame_labels_dict = frame_labels_dict
+        else:
+            self.frame_labels_dict = {
+                'low_visible': 1,
+                'high_visible': 2,
+                'low_measurable': 3,
+                'high_measurable': 4
+            }
 
     def __len__(self):
         return len(self.keys)
@@ -1040,8 +1062,8 @@ class USAnnotatedBlindSweep(Dataset):
             frame_labels = frames[self.frame_label].values.tolist()
             frame_labels_idx = [self.frame_labels_dict[lbl] for lbl in frame_labels]
 
-            img_labels_t = torch.zeros(img_t.shape[0], dtype=torch.int64)
-            img_labels_t[frame_idx] = torch.tensor(frame_labels_idx, dtype=torch.int64)
+            img_labels_t = torch.zeros(img_t.shape[0], dtype=torch.float32)
+            img_labels_t[frame_idx] = torch.tensor(frame_labels_idx, dtype=torch.float32)
 
             if self.num_frames > 0:
                 idx = torch.randint(low=0, high=img_t.shape[0], size=(self.num_frames,))
