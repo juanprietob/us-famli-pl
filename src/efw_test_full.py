@@ -16,6 +16,8 @@ from tqdm import tqdm
 
 import pickle
 
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 def main(args):
 
     NN = getattr(efw, args.nn)    
@@ -57,8 +59,8 @@ def main(args):
         tags_f.append(tags)
 
         with torch.no_grad():
-            x = [x_.cuda() for x_ in x]
-            tags = tags.cuda()
+            x = [x_.cuda(non_blocking=True) for x_ in x]
+            tags = tags.cuda(non_blocking=True)
 
             for idx, x_sweep in enumerate(x):
                 tag = tags[:, idx]
