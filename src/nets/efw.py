@@ -67,7 +67,8 @@ class EfwNet(LightningModule):
         self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=64, output_dim=1, activation=nn.PReLU)
         # self.proj_final = HeteroscedasticHead(input_dim=self.hparams.embed_dim, hidden=64)
 
-        self.loss_fn = nn.HuberLoss(delta=0.7)
+        # self.loss_fn = nn.HuberLoss(delta=0.7)
+        self.loss_fn = nn.MSELoss()
         # self.loss_fn = nn.MSELoss()
         # self.loss_fn = gaussian_nll
         self.l1_fn = torch.nn.L1Loss()
