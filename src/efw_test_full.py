@@ -30,7 +30,7 @@ def main(args):
 
     test_ds = USDatasetBlindSweepWTag(df_test, mount_point=model.hparams.mount_point, img_column=model.hparams.img_column, tag_column=model.hparams.tag_column, ga_column=model.hparams.ga_column, id_column=model.hparams.id_column, frame_column=model.hparams.frame_column, class_column=model.hparams.class_column, presentation_column=model.hparams.presentation_column, efw_column=model.hparams.efw_column, max_sweeps=-1, transform=test_transform, num_frames=-1)
 
-    dl = DataLoader(test_ds, batch_size=1, num_workers=2, prefetch_factor=2, persistent_workers=True, pin_memory=True, collate_fn=None)
+    dl = DataLoader(test_ds, batch_size=1, num_workers=8, prefetch_factor=2, persistent_workers=True, pin_memory=True, collate_fn=None)
 
     Y = []
     preds = []
@@ -39,9 +39,13 @@ def main(args):
     scores_chunks = []
     scores_frames = []
     tags_f = []
-    df_groups = []
 
-
+    preds_sweep = []
+    ids_sweep = []
+    scores_sweeps = []
+    scores_chunks_sweep = []
+    file_path = []
+    Y_sweep = []
 
     for idx, batch in tqdm(enumerate(dl), total=len(dl)):        
         x = batch['img']  
@@ -55,7 +59,7 @@ def main(args):
         
         Y.append(y.item())        
         ids.append(test_ds.keys[idx])
-        df_groups.append(test_ds.df_group.get_group(test_ds.keys[idx]))
+        group = test_ds.df_group.get_group(test_ds.keys[idx])
         tags_f.append(tags)
 
         with torch.no_grad():
@@ -69,6 +73,16 @@ def main(args):
                 
                 z_, z_t_, z_t_s_ = model.encode(x_sweep, tag)
 
+                x_hat_, z_c_s_ = model.predict(z_t_)
+
+                row = group.iloc[idx]
+                preds_sweep.append(x_hat_.item())
+                ids_sweep.append(row[model.hparams.id_column])
+                scores_sweeps.append(z_t_s_.cpu())
+                scores_chunks_sweep.append(z_c_s_.cpu())
+                file_path.append(row[model.hparams.img_column])
+                Y_sweep.append(y.item())
+
                 z.append(z_)
                 z_t.append(z_t_)
                 z_t_s.append(z_t_s_)
@@ -81,10 +95,10 @@ def main(args):
             z_t = z_t.view(1, -1, model.hparams.embed_dim)  # [BS, N_s*n_chunks, self.hparams.embed_dim]
             scores_frames.append(z_t_s.cpu())
 
-            x_hat, z_c_s_ = model.predict(z_t)
+            x_hat, z_c_s = model.predict(z_t)
 
             preds.append(x_hat.item())
-            scores_chunks.append(z_c_s_.cpu())
+            scores_chunks.append(z_c_s.cpu())
 
     Y = torch.tensor(Y)
     preds = torch.tensor(preds)
@@ -103,7 +117,6 @@ def main(args):
         'id': ids,
         'efw_gt': Y.tolist(),
         'efw_pred': preds.tolist(),
-        'df_groups': df_groups,
         'ids': ids,
         'tags': tags_f,
         'scores_frames': scores_frames,
@@ -112,9 +125,31 @@ def main(args):
     with open(os.path.join(out_dir, 'prediction.pkl'), 'wb') as f:
         pickle.dump(out_dict, f)
 
+    Y_sweep = torch.tensor(Y_sweep)
+    preds_sweep = torch.tensor(preds_sweep)
+    abs_errors = torch.abs(Y_sweep - preds_sweep)
+    mse = torch.mean((Y_sweep - preds_sweep) ** 2)
+    mae = torch.mean(abs_errors)
+    mape = torch.mean(abs_errors / Y_sweep) * 100.0        
+    print("Sweep-level results:")
+    print(f'MSE: {mse.item():.2f}, MAE: {mae.item():.2f}, MAPE: {mape.item():.2f}')
+
+
+    out_dict_sweep = {
+        'id': ids_sweep,
+        'efw_gt': Y_sweep,
+        'efw_pred': preds_sweep,
+        'scores_sweeps': scores_sweeps,
+        'scores_chunks_sweep': scores_chunks_sweep,
+        'file_path': file_path
+    }
+    with open(os.path.join(out_dir, 'prediction_sweep.pkl'), 'wb') as f:
+        pickle.dump(out_dict_sweep, f)
+
     txt = "This test was performed using the following command:\n\n"
     txt += " ".join(os.sys.argv) + "\n\n"
     txt += f"Results:\nMSE: {mse.item():.2f}, MAE: {mae.item():.2f}, MAPE: {mape.item():.2f}\n"
+    txt += f"Sweep-level results:\nMSE: {mse.item():.2f}, MAE: {mae.item():.2f}, MAPE: {mape.item():.2f}\n"
     txt += f"Number of samples: {len(Y)}\n"
     txt += f"Model checkpoint: {args.model}\n"
 
