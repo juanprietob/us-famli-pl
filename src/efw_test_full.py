@@ -66,8 +66,8 @@ def main(args):
             x = [x_.cuda(non_blocking=True) for x_ in x]
             tags = tags.cuda(non_blocking=True)
 
-            for idx, x_sweep in enumerate(x):
-                tag = tags[:, idx]
+            for idx_s, x_sweep in enumerate(x):
+                tag = tags[:, idx_s]
                 
                 x_sweep = x_sweep.permute(0, 2, 1, 3, 4)  # [BS, T, C, H, W]
                 
@@ -75,7 +75,8 @@ def main(args):
 
                 x_hat_, z_c_s_ = model.predict(z_t_)
 
-                row = group.iloc[idx]
+                row = group.iloc[idx_s]
+                
                 preds_sweep.append(x_hat_.item())
                 ids_sweep.append(row[model.hparams.id_column])
                 scores_sweeps.append(z_t_s_.cpu())
