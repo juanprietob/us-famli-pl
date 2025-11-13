@@ -329,3 +329,212 @@ class EfwNet(LightningModule):
         x_hat, z_c_s = self.predict(z_t)
 
         return x_hat, z_t_s, z_c_s
+    
+
+class EfwN(LightningModule):
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.save_hyperparameters()
+        
+        encoder = torchvision.models.efficientnet_v2_s(weights='IMAGENET1K_V1')
+        encoder.classifier = nn.Identity()
+        self.encoder = TimeDistributed(encoder)
+        self.proj = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=self.hparams.embed_dim, activation=nn.PReLU)
+
+        self.dropout = nn.Dropout(self.hparams.dropout)
+        
+        self.attn = SelfAttention(input_dim=self.hparams.embed_dim, hidden_dim=64)
+        self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=64, output_dim=1, activation=nn.PReLU)
+
+        self.loss_fn = nn.HuberLoss(delta=self.hparams.huber_delta)
+        # self.loss_fn = nn.MSELoss()
+        # self.loss_fn = nn.MSELoss()
+        # self.loss_fn = gaussian_nll
+        self.l1_fn = torch.nn.L1Loss()
+        
+
+        self.train_transform = v2.Compose(
+            [
+                v2.RandomHorizontalFlip(),                
+                v2.RandomChoice([
+                    v2.Compose([v2.RandomRotation(180), v2.Pad(64), v2.RandomCrop(size=256)]),
+                    v2.RandomResizedCrop(size=256, scale=(0.4, 1.0), ratio=(0.75, 1.3333333333333333))
+                ]),
+                v2.RandomApply([v2.GaussianBlur(5, sigma=(0.1, 2.0))], p=0.5),
+                v2.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2])
+            ]
+        )
+
+        # self.all2iq3 = torch.jit.load("/mnt/famli_netapp_shared/C1_ML_Analysis/trained_models/cut/all2iq3_v1_epoch=23-val_loss=5.75.pt")
+        # self.all2iq3.eval()
+
+    @staticmethod
+    def add_model_specific_args(parent_parser):
+        group = parent_parser.add_argument_group("Fetal EFW simple model")
+
+        group.add_argument("--lr", type=float, default=1e-4)
+        group.add_argument("--betas", type=float, nargs="+", default=(0.9, 0.999), help='Betas for Adam optimizer')
+        group.add_argument('--weight_decay', help='Weight decay for optimizer', type=float, default=1e-5)
+        group.add_argument('--huber_delta', help='Delta for Huber loss', type=float, default=0.5)
+        
+        # Image Encoder parameters                 
+        group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
+        
+        group.add_argument("--embed_dim", type=int, default=128, help='Embedding dimension')        
+        group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
+        
+        group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
+        group.add_argument("--warmup_epochs", type=int, default=-1, help='Number of epochs to warmup the scores regularization')
+
+        group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
+
+        return parent_parser
+    
+    def configure_optimizers(self):
+        optimizer = optim.AdamW(self.parameters(),
+                                lr=self.hparams.lr,
+                                betas=self.hparams.betas,
+                                weight_decay=self.hparams.weight_decay)
+        return optimizer
+    
+    def entropy_penalty(self, s, eps=1e-8):
+        s = s.clamp(eps, 1 - eps)
+        H = -(s * torch.log(s) + (1 - s) * torch.log(1 - s))
+        return H.mean() 
+
+    def regularizer(self, scores, lam_ent=1.0):
+        reg += lam_ent * self.entropy_penalty(scores)
+        return reg
+
+    def compute_loss(self, Y, X_hat, X_s=None, X_s_ac=None, Y_s_ac=None, step="train", sync_dist=False):
+
+        loss = self.loss_fn(Y, X_hat)
+
+        self.log(f"{step}_loss", loss, sync_dist=sync_dist)
+        
+        l1 = self.l1_fn(X_hat, Y)
+        self.log(f"{step}_l1", l1, sync_dist=sync_dist)
+
+        if X_s is not None:
+
+            X_s = X_s.view(-1)
+            self.log(f"{step}_scores/mean", X_s.mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores/max", X_s.max(), sync_dist=sync_dist)
+            self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores/s>=0.5", (X_s >= 0.5).float().mean(), sync_dist=sync_dist)            
+
+            if self.hparams.warmup_epochs < 0 or self.current_epoch < self.hparams.warmup_epochs:
+                reg_loss = 0
+            else:
+                reg_loss = self.regularizer(X_s, lam_ent=self.hparams.lam_ent)
+
+            self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
+
+            if step == "train":
+                loss = loss + reg_loss
+
+        if X_s_ac is not None and Y_s_ac is not None:
+            loss_ac = self.l1_fn(Y_s_ac, X_s_ac)
+            self.log(f"{step}_loss_ac", loss_ac, sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/mean", X_s_ac.mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/max", X_s_ac.max(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/s>=0.9", (X_s_ac >= 0.9).float().mean(), sync_dist=sync_dist)
+            self.log(f"{step}_scores_ac/s>=0.5", (X_s_ac >= 0.5).float().mean(), sync_dist=sync_dist)
+            if step == "train":
+                loss = loss + loss_ac
+
+        return loss
+
+    def training_step(self, train_batch, batch_idx):
+        X = train_batch["img"]
+        tags = train_batch["tag"]
+        Y = train_batch["efw"]
+
+        X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
+
+        x_hat, x_s = self(self.train_transform(X), tags)
+
+        if 'img_ac' in train_batch:
+            X_ac = train_batch["img_ac"]
+            tags_ac = train_batch["tag_ac"]
+            Y_ac = train_batch["score_ac"]
+            
+            X_ac = X_ac.unsqueeze(1).permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
+            tags_ac = tags_ac.unsqueeze(1)
+
+            _, x_s_ac = self(self.train_transform(X_ac), tags_ac)       
+            
+            return self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, X_s_ac=x_s_ac, Y_s_ac=Y_ac,step="train")
+
+        return self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="train")
+
+    def validation_step(self, val_batch, batch_idx):
+        
+        X = val_batch["img"]
+        tags = val_batch["tag"]
+        Y = val_batch["efw"]
+
+        X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
+
+        x_hat, x_s = self(X, tags)
+
+        self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="val", sync_dist=True)
+
+    def test_step(self, test_batch, batch_idx):
+        X = test_batch["img"]
+        tags = test_batch["tag"]
+        Y = test_batch["efw"]
+
+        X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
+
+        x_hat, x_s = self(X, tags)
+        self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="test", sync_dist=True)
+
+    def encode(self, x: torch.Tensor, tag: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        
+        """
+        Forwards an image through the spatial encoder, obtaining the latent
+
+        Args:
+            x: BxCx[SPATIAL DIMS] tensor
+
+        """
+        z_ = self.encoder(x)
+        z_ = self.proj(z_) # [BS, T, self.hparams.embed_dim]
+
+        return z_
+    
+    def predict(self, z_t: torch.Tensor) -> torch.Tensor:
+        z_t, z_s = self.attn(z_t, z_t)
+        x_hat = self.proj_final(z_t)
+        return x_hat, z_s
+
+    def forward(self, x_sweeps: torch.tensor, sweeps_tags: torch.tensor):
+        
+        batch_size = x_sweeps.shape[0]
+
+        # x_sweeps shape is B, N, C, T, H, W. N for number of sweeps ex. torch.Size([2, 2, 200, 3, 256, 256]) 
+        # tags shape torch.Size([2, 2])
+        Nsweeps = x_sweeps.shape[1] # Number of sweeps -> T
+
+        z = []
+        z_t = []
+        z_t_s = []
+
+        for n in range(Nsweeps):
+
+            x_sweeps_n = x_sweeps[:, n, :, :, :, :] # [BS, T, C, H, W]            
+            tag = sweeps_tags[:,n]    
+
+            z_ = self.encode(x_sweeps_n, tag) # [BS, T, self.hparams.features]
+            z.append(z_)
+
+
+        z = torch.stack(z, dim=1)  # [BS, N_sweeps, T, self.hparams.embed_dim]
+
+        z = z.view(batch_size, -1, self.hparams.embed_dim)  # [BS, N_s*n_chunks, self.hparams.embed_dim]
+        x_hat, x_s = self.predict(z)
+
+        x_s = x_s.view(batch_size, -1)  # [BS, N]
+
+        return x_hat, x_s
