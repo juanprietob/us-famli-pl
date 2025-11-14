@@ -1,5 +1,6 @@
 import argparse
 import os
+import torch
 
 from loaders import ultrasound_dataset
 
@@ -15,7 +16,8 @@ def main(args):
 
     DM = getattr(ultrasound_dataset, model.hparams.data_module)    
 
-    model.hparams.csv_test = args.csv
+    if args.csv:
+        model.hparams.csv_test = args.csv
     datamodule = DM(**model.hparams)
 
     logger_neptune = None
@@ -27,6 +29,14 @@ def main(args):
             log_model_checkpoints=False
         )
 
+    trainer = Trainer(
+        logger=logger_neptune,
+        devices=torch.cuda.device_count(),
+        accelerator='gpu',
+    )
+
+    trainer.test(model, datamodule=datamodule)
+
 if __name__ == '__main__':
 
 
@@ -34,7 +44,7 @@ if __name__ == '__main__':
 
     input_group = parser.add_argument_group('Input')
 
-    input_group.add_argument('--csv', help='CSV file path', type=str, default='/mnt/raid/C1_ML_Analysis/CSV_files/efw_2025-10-31_test.csv')
+    input_group.add_argument('--csv', help='CSV file path', type=str, default=None)
     input_group.add_argument('--nn', help='Type of neural network', type=str, required=True)
     input_group.add_argument('--model', help='Model for testing', type=str, default=None)
 
