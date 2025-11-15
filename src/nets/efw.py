@@ -662,6 +662,7 @@ class EfwAtt(LightningModule):
 
         """
         z_ = self.encoder(x)
+        z_ = self.dropout(z_)
 
         return z_
     
