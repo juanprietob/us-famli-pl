@@ -309,6 +309,27 @@ class SelfAttention(nn.Module):
         context_vector = torch.sum(context_vector, dim=self.dim)
 
         return context_vector, score
+
+class FullAttention(nn.Module):
+    def __init__(self, input_dim, dim=1):
+        super().__init__()
+
+        self.W1 = nn.Linear(input_dim, input_dim)
+        self.V = nn.Linear(input_dim, input_dim)
+        self.Tanh = nn.Tanh()
+        self.Sigmoid = nn.Sigmoid()  
+        self.dim = dim      
+
+    def forward(self, query, values):
+        
+        score = self.Sigmoid(self.V(self.Tanh(self.W1(query))))
+
+        attention_weights = score/torch.sum(score, dim=self.dim, keepdim=True)
+
+        context_vector = attention_weights * values
+        context_vector = torch.sum(context_vector, dim=self.dim)
+
+        return context_vector, score
     
 class AttentionChunk(nn.Module):
     def __init__(self, input_dim, hidden_dim, chunks=16, time_dim=1):
