@@ -324,7 +324,7 @@ class FullAttention(nn.Module):
         
         score = self.Sigmoid(self.V(self.Tanh(self.W1(query))))
 
-        attention_weights = score/torch.sum(score, dim=self.dim, keepdim=True)
+        attention_weights = score/torch.sum(score, dim=self.dim, keepdim=True)        
 
         context_vector = attention_weights * values
         context_vector = torch.sum(context_vector, dim=self.dim)

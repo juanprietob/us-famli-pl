@@ -548,11 +548,12 @@ class EfwAtt(LightningModule):
         encoder = torchvision.models.efficientnet_v2_s(weights='IMAGENET1K_V1')
         encoder.classifier = nn.Identity()
         self.encoder = TimeDistributed(encoder)
+        self.proj = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=self.hparams.embed_dim, activation=nn.PReLU)
 
         self.dropout = nn.Dropout(self.hparams.dropout)
-        
-        self.attn = FullAttention(input_dim=self.hparams.features)
-        self.proj_final = ProjectionHead(input_dim=self.hparams.features, hidden_dim=128, output_dim=1, activation=nn.PReLU)
+
+        self.attn = FullAttention(input_dim=self.hparams.embed_dim)
+        self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=self.hparams.embed_dim, output_dim=1, activation=nn.PReLU)
 
         self.loss_fn = nn.HuberLoss(delta=self.hparams.huber_delta)
         # self.loss_fn = nn.MSELoss()
@@ -587,6 +588,7 @@ class EfwAtt(LightningModule):
         
         # Image Encoder parameters                 
         group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
+        group.add_argument("--embed_dim", type=int, default=128, help='Embedding dimension')
         group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
@@ -662,6 +664,7 @@ class EfwAtt(LightningModule):
 
         """
         z_ = self.encoder(x)
+        z_ = self.proj(z_) 
         z_ = self.dropout(z_)
 
         return z_
@@ -694,9 +697,9 @@ class EfwAtt(LightningModule):
 
         z = torch.stack(z, dim=1)  # [BS, N_sweeps, T, self.hparams.embed_dim]
 
-        z = z.view(batch_size, -1, self.hparams.features)  # [BS, N_s*n_chunks, self.hparams.embed_dim]
+        z = z.view(batch_size, -1, self.hparams.embed_dim)  # [BS, N_s*n_chunks, self.hparams.embed_dim]
         x_hat, x_s = self.predict(z)
 
-        x_s = x_s.view(batch_size, -1, self.hparams.features)  # [BS, N]
+        x_s = x_s.view(batch_size, -1, self.hparams.embed_dim)  # [BS, N]
 
         return x_hat, x_s
