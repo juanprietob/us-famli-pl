@@ -406,7 +406,7 @@ class EfwN(LightningModule):
         reg += lam_ent * self.entropy_penalty(scores)
         return reg
 
-    def compute_loss(self, Y, X_hat, X_s=None, X_s_ac=None, Y_s_ac=None, step="train", sync_dist=False):
+    def compute_loss(self, Y, X_hat, X_hat_f=None, X_s=None, X_s_ac=None, Y_s_ac=None, step="train", sync_dist=False):
 
         loss = self.loss_fn(Y, X_hat)
 
@@ -416,8 +416,7 @@ class EfwN(LightningModule):
         self.log(f"{step}_l1", l1, sync_dist=sync_dist)
 
         if X_s is not None:
-
-            X_s = X_s.view(-1)
+            
             self.log(f"{step}_scores/mean", X_s.mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores/max", X_s.max(), sync_dist=sync_dist)
             self.log(f"{step}_scores/s>=0.9", (X_s >= 0.9).float().mean(), sync_dist=sync_dist)
@@ -426,12 +425,18 @@ class EfwN(LightningModule):
             if self.hparams.warmup_epochs < 0 or self.current_epoch < self.hparams.warmup_epochs:
                 reg_loss = 0
             else:
-                reg_loss = self.regularizer(X_s, lam_ent=self.hparams.lam_ent)
+                reg_loss = self.regularizer(X_s.view(-1), lam_ent=self.hparams.lam_ent)
 
             self.log(f"{step}_loss_reg", reg_loss, sync_dist=sync_dist)
 
             if step == "train":
                 loss = loss + reg_loss
+            
+            if( X_hat_f is not None):
+                loss_f = ((X_hat_f.squeeze(-1) - Y).abs()*(X_s > 0.8).float()).sum()/(X_s > 0.8).float().sum().clamp(min=1.0) 
+                self.log(f"{step}_loss_f", loss_f, sync_dist=sync_dist)
+                if step == "train":
+                    loss = loss + loss_f
 
         if X_s_ac is not None and Y_s_ac is not None:
             loss_ac = self.l1_fn(Y_s_ac, X_s_ac)
@@ -452,7 +457,8 @@ class EfwN(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, x_s = self(self.train_transform(X), tags)
+        x_hat, x_s, z = self(self.train_transform(X), tags)
+        x_hat_f = self.proj_final(z)
 
         if 'img_ac' in train_batch:
             X_ac = train_batch["img_ac"]
@@ -462,11 +468,11 @@ class EfwN(LightningModule):
             X_ac = X_ac.unsqueeze(1).permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
             tags_ac = tags_ac.unsqueeze(1)
 
-            _, x_s_ac = self(self.train_transform(X_ac), tags_ac)       
+            _, x_s_ac, _ = self(self.train_transform(X_ac), tags_ac)       
             
-            return self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, X_s_ac=x_s_ac, Y_s_ac=Y_ac,step="train")
+            return self.compute_loss(Y=Y, X_hat=x_hat, X_hat_f=x_hat_f, X_s=x_s, X_s_ac=x_s_ac, Y_s_ac=Y_ac,step="train")
 
-        return self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="train")
+        return self.compute_loss(Y=Y, X_hat=x_hat, X_hat_f=x_hat_f, X_s=x_s, step="train")
 
     def validation_step(self, val_batch, batch_idx):
         
@@ -476,7 +482,7 @@ class EfwN(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, x_s = self(X, tags)
+        x_hat, x_s, _ = self(X, tags)
 
         self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="val", sync_dist=True)
 
@@ -487,7 +493,7 @@ class EfwN(LightningModule):
 
         X = X.permute(0, 1, 3, 2, 4, 5)  # Shape is now [B, N, T, C, H, W]
 
-        x_hat, x_s = self(X, tags)
+        x_hat, x_s, _ = self(X, tags)
         self.compute_loss(Y=Y, X_hat=x_hat, X_s=x_s, step="test", sync_dist=True)
 
     def encode(self, x: torch.Tensor, tag: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -537,7 +543,7 @@ class EfwN(LightningModule):
 
         x_s = x_s.view(batch_size, -1)  # [BS, N]
 
-        return x_hat, x_s
+        return x_hat, x_s, z
 
 
 class EfwAtt(LightningModule):
