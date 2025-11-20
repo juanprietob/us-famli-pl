@@ -181,6 +181,7 @@ class EfwNet(LightningModule):
                 reg_loss = 0
                 loss_f = 0
             else:
+                loss_f = 0
                 reg_loss = self.regularizer(X_s.view(-1), rho0=self.hparams.rho[0], rho1=self.hparams.rho[1])*self.hparams.loss_reg_weight
 
                 if step == "train":
@@ -347,10 +348,13 @@ class EfwN(LightningModule):
         self.proj_final = ProjectionHead(input_dim=self.hparams.embed_dim, hidden_dim=64, output_dim=1, activation=nn.PReLU)
 
         self.loss_fn = nn.HuberLoss(delta=self.hparams.huber_delta)
+        self.l1_fn = torch.nn.L1Loss()
         # self.loss_fn = nn.MSELoss()
         # self.loss_fn = nn.MSELoss()
         # self.loss_fn = gaussian_nll
-        self.l1_fn = torch.nn.L1Loss()
+        self.ac_loss_fn = torch.nn.L1Loss()
+        if self.hparams.ac_bce:
+            self.ac_loss_fn = torch.nn.BCELoss()
         
 
         self.train_transform = v2.Compose(
@@ -387,6 +391,7 @@ class EfwN(LightningModule):
         group.add_argument("--warmup_epochs", type=int, default=-1, help='Number of epochs to warmup the scores regularization')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
+        group.add_argument("--ac_bce", type=int, default=0, help='Use BCE loss for ac loss')
 
         return parent_parser
     
@@ -403,7 +408,7 @@ class EfwN(LightningModule):
         return H.mean() 
 
     def regularizer(self, scores, lam_ent=1.0):
-        reg += lam_ent * self.entropy_penalty(scores)
+        reg = lam_ent * self.entropy_penalty(scores)
         return reg
 
     def compute_loss(self, Y, X_hat, X_hat_f=None, X_s=None, X_s_ac=None, Y_s_ac=None, step="train", sync_dist=False):
@@ -439,7 +444,7 @@ class EfwN(LightningModule):
                     loss = loss + loss_f
 
         if X_s_ac is not None and Y_s_ac is not None:
-            loss_ac = self.l1_fn(Y_s_ac, X_s_ac)
+            loss_ac = self.ac_loss_fn(X_s_ac, Y_s_ac)
             self.log(f"{step}_loss_ac", loss_ac, sync_dist=sync_dist)
             self.log(f"{step}_scores_ac/mean", X_s_ac.mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores_ac/max", X_s_ac.max(), sync_dist=sync_dist)
