@@ -388,6 +388,7 @@ class EfwN(LightningModule):
         group.add_argument("--dropout", type=float, default=0.1, help='Dropout rate')
         
         group.add_argument("--lam_ent", type=float, default=1.0, help='Weight for entropy regularization loss, controls pushing scores toward 0 or 1')
+        group.add_argument("--lam_ac", type=float, default=1.0, help='Weight for ac loss')
         group.add_argument("--warmup_epochs", type=int, default=-1, help='Number of epochs to warmup the scores regularization')
 
         group.add_argument("--output_dim", type=int, default=1, help='Output dimension')
@@ -451,7 +452,7 @@ class EfwN(LightningModule):
             self.log(f"{step}_scores_ac/s>=0.9", (X_s_ac >= 0.9).float().mean(), sync_dist=sync_dist)
             self.log(f"{step}_scores_ac/s>=0.5", (X_s_ac >= 0.5).float().mean(), sync_dist=sync_dist)
             if step == "train":
-                loss = loss + loss_ac
+                loss = loss + self.hparams.lam_ac * loss_ac
 
         return loss
 

@@ -38,6 +38,7 @@ def main(args):
     scores_frames = []
     tags_f = []
 
+    preds_frames = []
     preds_sweep = []
     ids_sweep = []
     scores_sweeps = []
@@ -67,10 +68,12 @@ def main(args):
                 
                 z_ = model.encode(x_sweep, tag)
 
+                x_hat_frame_ = model.proj_final(z_)
                 x_hat_, z_s_ = model.predict(z_)
 
                 row = group.iloc[idx_s]
-                
+
+                preds_frames.append(x_hat_frame_.cpu())
                 preds_sweep.append(x_hat_.item())
                 ids_sweep.append(row[model.hparams.id_column])
                 scores_sweeps.append(z_s_.cpu())
@@ -122,6 +125,7 @@ def main(args):
         'id': ids_sweep,
         'efw_gt': Y_sweep,
         'efw_pred': preds_sweep,
+        'efw_pred_frames': preds_frames,
         'scores_sweeps': scores_sweeps,
         'file_path': file_path
     }

@@ -15,7 +15,7 @@ from lightning.pytorch.loggers import NeptuneLogger
 from neptune.types import File
 
 import torchmetrics
-from torchmetrics import Accuracy
+from torchmetrics import Accuracy, MeanAbsoluteError, MeanSquaredError, R2Score, PearsonCorrCoef
 from torchmetrics.aggregation import CatMetric
 from sklearn.metrics import classification_report, roc_curve, auc
 import matplotlib.pyplot as plt
@@ -487,44 +487,45 @@ class RegEffnetV2s(LightningModule):
         super().__init__()
         self.save_hyperparameters()
         
-        self.model = torchvision.models.efficientnet_v2_s(weights='IMAGENET1K_V1')
-        self.model.classifier = nn.Identity()
-        self.proj_bin = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=1, activation=nn.LeakyReLU)
-        self.proj_qc = ProjectionHead(input_dim=self.hparams.features, hidden_dim=self.hparams.features, output_dim=1, activation=nn.LeakyReLU)
-        self.act_qc = nn.Sigmoid()
+        encoder = torchvision.models.efficientnet_v2_s(weights='IMAGENET1K_V1')
+        encoder.classifier = nn.Identity()
 
-        self.train_transform = T.Compose(
+        self.encoder = TimeDistributed(encoder)
+
+        self.proj = nn.Linear(self.hparams.features, 1)
+        self.act = nn.Sigmoid()
+
+        self.train_transform = v2.Compose(
             [
-                T.RandomHorizontalFlip(),
-                T.RandomRotation(180),
-                T.RandomResizedCrop(size=256, scale=(0.25, 1.0), ratio=(0.75, 1.3333333333333333)),
-                T.RandomApply([T.GaussianBlur(5, sigma=(0.1, 2.0))], p=0.5),
-                T.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2]),
-                NoiseLevelTransform()
+                v2.RandomHorizontalFlip(),
+                v2.RandomRotation(180),
+                v2.RandomResizedCrop(size=256, scale=(0.25, 1.0), ratio=(0.75, 1.3333333333333333)),
+                v2.RandomApply([v2.GaussianBlur(5, sigma=(0.1, 2.0))], p=0.5),
+                v2.ColorJitter(brightness=[0.5, 1.5], contrast=[0.5, 1.5], saturation=[0.5, 1.5], hue=[-.2, .2])
             ]
         )
 
-        self.accuracy = Accuracy(task='binary')
-        self.conf = torchmetrics.ConfusionMatrix(task='binary', normalize='true')
+        self.loss_fn = nn.L1Loss(reduction='sum')
 
-        self.probs = CatMetric()
+        self.mae = MeanAbsoluteError()
+        self.mse = MeanSquaredError()
+
+        self.preds = CatMetric()
         self.targets = CatMetric()
+
 
     @staticmethod
     def add_model_specific_args(parent_parser):
         group = parent_parser.add_argument_group("BCE with Regression Model")
 
         group.add_argument("--lr", type=float, default=1e-3)
-        group.add_argument("--betas", type=tuple, default=(0.9, 0.999), help='Betas for Adam optimizer')
+        group.add_argument("--betas", type=float, nargs="+", default=(0.9, 0.999), help='Betas for Adam optimizer')
         group.add_argument('--weight_decay', help='Weight decay for optimizer', type=float, default=0.01)
         
         # Image Encoder parameters 
         group.add_argument("--spatial_dims", type=int, default=2, help='Spatial dimensions for the encoder')
         group.add_argument("--in_channels", type=int, default=3, help='Input channels for encoder')
         group.add_argument("--features", type=int, default=1280, help='Number of output features for the encoder')
-        group.add_argument("--max_class", type=int, default=4, help='Maximum class for the regression output')
-
-        group.add_argument("--w_qc", type=float, default=1.0, help='Weight for the regression loss term')
         
 
         return parent_parser
@@ -536,110 +537,162 @@ class RegEffnetV2s(LightningModule):
                                 weight_decay=self.hparams.weight_decay)
         return optimizer
     
-    def compute_loss(self, Y, X_hat_bin, X_hat_qc, step="train", sync_dist=False):
+    def compute_loss(self, Y, X_hat, step="train", sync_dist=False):
 
-        Y_bin = (Y > 1).float().unsqueeze(-1)
+        # print("Y unique:", torch.unique(Y))
+        # print("Y min/max:", Y.min().item(), Y.max().item())
+        # print("Number of zeros in Y:", (Y == 0).sum().item())
 
-        loss_bin = F.binary_cross_entropy_with_logits(X_hat_bin, Y_bin)
-
-        Y_qc = (Y > 0).float().unsqueeze(-1)
-        X_hat_qc = X_hat_qc*Y_qc  # Mask regression output for background class
-        loss_qc = self.hparams.w_qc * F.mse_loss(X_hat_qc.squeeze(-1), Y.float()/self.hparams.max_class, reduction='sum')/ Y_qc.sum().clamp(min=1.0)
-
-        loss =  loss_bin + loss_qc
+        # print("X_hat min/max:", X_hat.min().item(), X_hat.max().item())
+        # print("Number of zeros in X_hat:", (X_hat == 0).sum().item())
+        
+        loss = self.loss_fn(X_hat, Y.float())*((Y*8.0)*(Y>=0.75) + 1.0).sum()
 
         self.log(f"{step}_loss", loss, sync_dist=sync_dist)
-        self.log(f"{step}_loss_bin", loss_bin, sync_dist=sync_dist)
-        self.log(f"{step}_loss_qc", loss_qc, sync_dist=sync_dist)
 
-        batch_size = Y.size(0)
+        self.mae(X_hat, Y)
+        self.mse(X_hat, Y)
 
-        self.accuracy(X_hat_bin, Y_bin)
-        self.log(f"{step}_acc", self.accuracy, batch_size=batch_size, sync_dist=sync_dist)
+        self.log(f"{step}_mae", self.mae, sync_dist=sync_dist)
+        self.log(f"{step}_mse", self.mse, sync_dist=sync_dist)
 
         return loss
 
     def training_step(self, train_batch, batch_idx):
-        X, Y = train_batch
+        X = train_batch["img"]
+        Y = train_batch["class"]
 
-        x_hat_bin, x_hat_qc = self(self.train_transform(X))
+        X = X.permute(0, 2, 1, 3, 4)  # (B, T, C, H, W) -> (B, C, T, H, W)
 
-        return self.compute_loss(Y=Y, X_hat_bin=x_hat_bin, X_hat_qc=x_hat_qc, step="train")
+        x_hat = self(self.train_transform(X))
+
+        return self.compute_loss(Y=Y, X_hat=x_hat, step="train")
 
     def validation_step(self, val_batch, batch_idx):
         
-        X, Y = val_batch
+        X = val_batch["img"]
+        Y = val_batch["class"]
 
-        x_hat_bin, x_hat_qc = self(X)
+        X = X.permute(0, 2, 1, 3, 4)
 
-        self.compute_loss(Y=Y, X_hat_bin=x_hat_bin, X_hat_qc=x_hat_qc, step="val", sync_dist=True)
+        x_hat = self(X)
 
-        Y_bin = (Y > 1).float()
-        self.probs.update(x_hat_bin)
-        self.targets.update(Y_bin)
-        self.conf.update(x_hat_bin, Y_bin.unsqueeze(-1))
+        self.compute_loss(Y=Y, X_hat=x_hat, step="val", sync_dist=True)
+
+        self.preds.update(x_hat.view(-1))
+        self.targets.update(Y.view(-1))
 
     def on_validation_epoch_end(self):
         
-        probs = self.probs.compute()
-        targets = self.targets.compute()
-        confmat  = self.conf.compute()
+        preds = self.preds.compute().view(-1)
+        targets = self.targets.compute().view(-1)
 
+        # compute metrics
+        mae = self.mae.compute()
+        mse = self.mse.compute()
+        # reset metrics for next epoch
+        self.mae.reset()
+        self.mse.reset()
+
+        # OPTIONAL: create a scatter plot y_true vs y_pred and upload to Neptune
         if self.trainer.is_global_zero:
-            fig_cm = plt.figure()
-            plt.imshow(confmat.cpu().numpy(), interpolation='nearest')
-            plt.title("Confusion Matrix")
-            plt.xlabel("Predicted")
-            plt.ylabel("True")
-            plt.colorbar()
-            plt.tight_layout()
 
-            if isinstance(self.trainer.logger, NeptuneLogger):
-                self.trainer.logger.experiment["images/val_Confusion_Matrix"].upload(fig_cm)
-            plt.close(fig_cm)
+            logger = self.trainer.logger
+            run = logger.experiment  
             
-            print(classification_report(targets.cpu().numpy(), probs.cpu().numpy() > 0.5, digits=3))
+            fig, ax = plt.subplots()
+            ax.scatter(targets.cpu(), preds.cpu(), alpha=0.4)
+            ax.plot([0, 1.1], [0, 1.1])  # identity line
+            ax.set_xlabel("True quality score")
+            ax.set_ylabel("Predicted quality score")
+            ax.set_title("Validation: y_true vs y_pred")
 
-        self.probs.reset()
+            experiment = None
+            if isinstance(logger, NeptuneLogger):
+                experiment = run["images/val_regression_scatter"]
+                experiment.upload(fig)
+            plt.close(fig)
+
+            # Example JSON report
+            report_dict = {
+                "mae": float(mae.cpu()),
+                "mse": float(mse.cpu()),
+                "rmse": float(torch.sqrt(mse).cpu())
+            }
+
+            if isinstance(logger, NeptuneLogger):
+                run["reports/val_regression_report"].upload(
+                    File.from_content(json.dumps(report_dict), extension="json")
+                )
+            else:
+                print(json.dumps(report_dict, indent=4))
+
+        self.preds.reset()
         self.targets.reset()
-        self.conf.reset()
 
     def test_step(self, test_batch, batch_idx):
-        X, Y = test_batch
+        X = test_batch["img"]
+        Y = test_batch["class"]
 
-        x_hat_bin, x_hat_qc = self(X)
+        X = X.permute(0, 2, 1, 3, 4)
 
-        Y_bin = (Y > 1).float()
-        self.probs.update(x_hat_bin)
-        self.targets.update(Y_bin)
-        self.conf.update(x_hat_bin, Y_bin.unsqueeze(-1))
+        x_hat = self(X)
+        
+        self.preds.update(x_hat)
+        self.targets.update(Y)
 
     def on_test_epoch_end(self):
 
-        confmat  = self.conf.compute()
-        probs = self.probs.compute()
-        targets = self.targets.compute()
+        preds = self.preds.compute().view(-1)
+        targets = self.targets.compute().view(-1)
 
+        # compute metrics
+        mae = self.mae.compute()
+        mse = self.mse.compute()
+        # reset metrics for next epoch
+        self.mae.reset()
+        self.mse.reset()
+
+        # OPTIONAL: create a scatter plot y_true vs y_pred and upload to Neptune
         if self.trainer.is_global_zero:
 
-            fig_cm = plt.figure()
-            plt.imshow(confmat.cpu().numpy(), interpolation='nearest')
-            plt.title("Confusion Matrix")
-            plt.xlabel("Predicted")
-            plt.ylabel("True")
-            plt.colorbar()
-            plt.tight_layout()
+            logger = self.trainer.logger
+            run = logger.experiment  
+            
+            fig, ax = plt.subplots()
+            ax.scatter(targets.cpu(), preds.cpu(), alpha=0.4)
+            ax.plot([0, 1.1], [0, 1.1])  # identity line
+            ax.set_xlabel("True quality score")
+            ax.set_ylabel("Predicted quality score")
+            ax.set_title("Validation: y_true vs y_pred")
 
-            if isinstance(self.trainer.logger, NeptuneLogger):
-                self.trainer.logger.experiment["images/test_Confusion_Matrix"].upload(fig_cm)
-            plt.close(fig_cm)
+            experiment = None
+            if isinstance(logger, NeptuneLogger):
+                experiment = run["images/test_regression_scatter"]
+                experiment.upload(fig)
+            plt.close(fig)
 
-            print(classification_report(targets.cpu().numpy(), probs.cpu().numpy() > 0.5, digits=3))
+            # Example JSON report
+            report_dict = {
+                "mae": float(mae.cpu()),
+                "mse": float(mse.cpu()),
+                "rmse": float(torch.sqrt(mse).cpu())
+            }
+
+            if isinstance(logger, NeptuneLogger):
+                run["reports/test_regression_report"].upload(
+                    File.from_content(json.dumps(report_dict), extension="json")
+                )
+            else:
+                print(json.dumps(report_dict, indent=4))
+
+        self.preds.reset()
+        self.targets.reset()
 
     def forward(self, x: torch.tensor):
 
-        z = self.model(x)
-        return self.proj_bin(z), self.act_qc(self.proj_qc(z))
+        z = self.encoder(x)
+        return self.act(self.proj(z).squeeze(-1))
 
 
 class FlyToClassification(LightningModule):

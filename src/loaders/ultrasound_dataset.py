@@ -796,7 +796,7 @@ class USDatasetBlindSweepWTag(Dataset):
                 'low_measurable': 1.0,
                 'high_measurable': 1.0
             }
-            self.ds_ac = USAnnotatedBlindSweep(self.df_train_ac, mount_point=mount_point, num_frames=num_frames, transform=transform, frame_labels_dict=frame_labels_dict)
+            self.ds_ac = USAnnotatedBlindSweep(self.df_train_ac, mount_point=mount_point, num_frames=num_frames, transform=transform, frame_label_dict=frame_labels_dict)
 
     def __len__(self):
         return len(self.keys)
@@ -1001,7 +1001,7 @@ class USDataModuleBlindSweepWTag(LightningDataModule):
 
 
 class USAnnotatedBlindSweep(Dataset):
-    def __init__(self, df, mount_point = "./", img_column='file_path', tag_column='tag', frame_column="frame_index", frame_label="annotation_label", id_column='annotation_id', num_frames=64, transform=None, frame_labels_dict=None):
+    def __init__(self, df, mount_point = "./", img_column='file_path', tag_column='tag', frame_column="frame_index", frame_label="annotation_label", id_column='annotation_id', num_frames=64, transform=None, frame_label_dict=None, sample_balanced=False):
         
         self.df_frames = df        
         self.mount_point = mount_point
@@ -1012,6 +1012,7 @@ class USAnnotatedBlindSweep(Dataset):
         self.frame_column = frame_column
         self.frame_label = frame_label        
         self.transform = transform
+        self.sample_balanced = sample_balanced
 
         self.df = self.df_frames[[id_column, img_column, tag_column]].drop_duplicates().reset_index(drop=True)
 
@@ -1021,10 +1022,10 @@ class USAnnotatedBlindSweep(Dataset):
 
         self.max_tag = np.max(list(self.tags_dict.values())) + 1
 
-        if frame_labels_dict:
-            self.frame_labels_dict = frame_labels_dict
+        if frame_label_dict:
+            self.frame_label_dict = frame_label_dict
         else:
-            self.frame_labels_dict = {
+            self.frame_label_dict = {
                 'low_visible': 1,
                 'high_visible': 2,
                 'low_measurable': 3,
@@ -1060,17 +1061,36 @@ class USAnnotatedBlindSweep(Dataset):
             frame_idx = np.clip(frame_idx, 0, img_t.shape[0]-1)
 
             frame_labels = frames[self.frame_label].values.tolist()
-            frame_labels_idx = [self.frame_labels_dict[lbl] for lbl in frame_labels]
+            frame_labels_idx = [self.frame_label_dict[lbl] for lbl in frame_labels]
 
             img_labels_t = torch.zeros(img_t.shape[0], dtype=torch.float32)
             img_labels_t[frame_idx] = torch.tensor(frame_labels_idx, dtype=torch.float32)
 
             if self.num_frames > 0:
-                idx = torch.randint(low=0, high=img_t.shape[0], size=(self.num_frames,))
-                idx = idx.sort().values
+                if self.sample_balanced:
+                    labels = img_labels_t
+                    unique_values = labels.unique()
+                    label_to_indices = {val.item(): (labels == val).nonzero(as_tuple=True)[0]
+                    for val in unique_values}
+                    min_count = min(len(idx) for idx in label_to_indices.values())
+                    balanced_indices = []
 
-                img_t = img_t[idx].contiguous()
-                img_labels_t = img_labels_t[idx].contiguous()
+                    for val, idx in label_to_indices.items():
+                        # randomly sample min_count from these indices
+                        perm = idx[torch.randperm(len(idx))[:min_count]]
+                        balanced_indices.append(perm)
+
+                    balanced_indices = torch.cat(balanced_indices)
+
+                    balanced_indices = balanced_indices[torch.randperm(len(balanced_indices))]
+                    img_t = img_t[balanced_indices].contiguous()
+                    img_labels_t = img_labels_t[balanced_indices].contiguous()
+                else:
+                    idx = torch.randint(low=0, high=img_t.shape[0], size=(self.num_frames,))
+                    idx = idx.sort().values
+
+                    img_t = img_t[idx].contiguous()
+                    img_labels_t = img_labels_t[idx].contiguous()
 
             img_t = img_t.unsqueeze(0).repeat(3,1,1,1).contiguous()            
 
@@ -1101,6 +1121,12 @@ class USAnnotatedBlindSweepDataModule(LightningDataModule):
         self.train_transform = ust.BlindSweepTrainTransforms()
         self.valid_transform = ust.BlindSweepEvalTransforms()
         self.test_transform = ust.BlindSweepEvalTransforms()
+
+        if self.hparams.frame_label_dict:
+            with open(self.hparams.frame_label_dict, 'r') as f:
+                self.frame_label_dict = json.load(f)
+        else:
+            self.frame_label_dict = None
         
     @staticmethod
     def add_data_specific_args(parent_parser):
@@ -1116,6 +1142,8 @@ class USAnnotatedBlindSweepDataModule(LightningDataModule):
         group.add_argument('--tag_column', type=str, default="tag")
         group.add_argument('--frame_column', type=str, default="frame_index")
         group.add_argument('--frame_label', type=str, default="annotation_label")
+        group.add_argument('--frame_label_dict', type=str, default=None, help="Path to a json file containing the frame labels dictionary")
+        group.add_argument('--sample_balanced', type=bool, default=False, help="Whether to sample balanced batches")
         group.add_argument('--id_column', type=str, default="annotation_id")
         group.add_argument('--batch_size', type=int, default=4, help="Batch size for the train dataloaders")
         group.add_argument('--num_frames', type=int, default=64, help="Number of frames to sample from each cine")
@@ -1127,9 +1155,9 @@ class USAnnotatedBlindSweepDataModule(LightningDataModule):
 
     def setup(self, stage=None):
         # Assign train/val datasets for use in dataloaders        
-        self.train_ds = USAnnotatedBlindSweep(self.df_train, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=self.hparams.num_frames, transform=self.train_transform)
-        self.val_ds = USAnnotatedBlindSweep(self.df_valid, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=-1, transform=self.valid_transform)
-        self.test_ds = USAnnotatedBlindSweep(self.df_test, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=-1, transform=self.test_transform)
+        self.train_ds = USAnnotatedBlindSweep(self.df_train, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=self.hparams.num_frames, transform=self.train_transform, frame_label_dict=self.frame_label_dict, sample_balanced=self.hparams.sample_balanced)
+        self.val_ds = USAnnotatedBlindSweep(self.df_valid, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=-1, transform=self.valid_transform, frame_label_dict=self.frame_label_dict)
+        self.test_ds = USAnnotatedBlindSweep(self.df_test, self.hparams.mount_point, img_column=self.hparams.img_column, tag_column=self.hparams.tag_column, frame_column=self.hparams.frame_column, frame_label=self.hparams.frame_label, id_column=self.hparams.id_column, num_frames=-1, transform=self.test_transform, frame_label_dict=self.frame_label_dict)
 
     def collate_fn(self, batch):
 
@@ -1251,7 +1279,7 @@ class USAnnotatedBlindSweep2DFrames(Dataset):
 
                 img_ac_t = img_ac_t[idx_ac]
                 img_ac_t = img_ac_t.unsqueeze(1).repeat(1,3,1,1).contiguous()
-                img_labels_ac_t = torch.ones(img_ac_t.shape[0])*self.frame_labels_dict['high_measurable']
+                img_labels_ac_t = torch.ones(img_ac_t.shape[0])*self.frame_label_dict['high_measurable']
                 if self.transform:
                     img_ac_t = self.transform(img_ac_t)
                 img_t = torch.cat([img_t, img_ac_t], dim=0)
