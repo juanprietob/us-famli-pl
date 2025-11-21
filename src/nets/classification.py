@@ -546,8 +546,7 @@ class RegEffnetV2s(LightningModule):
         # print("X_hat min/max:", X_hat.min().item(), X_hat.max().item())
         # print("Number of zeros in X_hat:", (X_hat == 0).sum().item())
         
-        loss = self.loss_fn(X_hat, Y.float())*((Y*8.0)*(Y>=0.75) + 1.0).sum()
-
+        loss = (self.loss_fn(X_hat, Y.float())*((Y*8.0)*(Y>=0.75) + 1.0)).sum()
         self.log(f"{step}_loss", loss, sync_dist=sync_dist)
 
         self.mae(X_hat, Y)
@@ -638,8 +637,8 @@ class RegEffnetV2s(LightningModule):
 
         x_hat = self(X)
         
-        self.preds.update(x_hat)
-        self.targets.update(Y)
+        self.preds.update(x_hat.view(-1))
+        self.targets.update(Y.view(-1))
 
     def on_test_epoch_end(self):
 

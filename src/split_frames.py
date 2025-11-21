@@ -74,7 +74,8 @@ def main(args):
         filenames = df[args.img_column].tolist()
 
         if args.use_multi:
-            process_map(split.split_fn, filenames, max_workers=cpu_count(), chunksize=1)
+            cpu_c = args.cpu_count if args.cpu_count else cpu_count()
+            process_map(split.split_fn, filenames, max_workers=cpu_c, chunksize=1)
         else:
             split = Split(args)
             for idx, row in tqdm(df.iterrows(), total=len(df)):
@@ -94,6 +95,7 @@ if __name__ == "__main__":
     parser.add_argument('--out', type=str, help='Output directory', required=True)
     parser.add_argument('--type', type=str, help='Output type', default="ubyte")
     parser.add_argument('--use_multi', type=int, help='Use multi processing', default=0)
+    parser.add_argument('--cpu_count', type=int, help='Number of CPUs to use for multiprocessing', default=None)
     parser.add_argument('--ow', type=int, help='Overwrite output', default=0)
 
     args = parser.parse_args()

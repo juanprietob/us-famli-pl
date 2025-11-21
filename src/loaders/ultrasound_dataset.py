@@ -1070,19 +1070,26 @@ class USAnnotatedBlindSweep(Dataset):
                 if self.sample_balanced:
                     labels = img_labels_t
                     unique_values = labels.unique()
-                    label_to_indices = {val.item(): (labels == val).nonzero(as_tuple=True)[0]
-                    for val in unique_values}
-                    min_count = min(len(idx) for idx in label_to_indices.values())
+                    label_to_indices = {val.item(): (labels == val).nonzero(as_tuple=True)[0] for val in unique_values}
+
+                    n_samples_per_class = self.num_frames // len(unique_values)
                     balanced_indices = []
+                    for val in unique_values:
+                        indices = label_to_indices[val.item()]
+                        if len(indices) >= n_samples_per_class:
+                            sampled_indices = torch.randperm(len(indices))[:n_samples_per_class]
+                            balanced_indices.extend(indices[sampled_indices].tolist())
+                        else:
+                            sampled_indices = torch.randint(low=0, high=len(indices), size=(n_samples_per_class,))
+                            balanced_indices.extend(indices[sampled_indices].tolist())
 
-                    for val, idx in label_to_indices.items():
-                        # randomly sample min_count from these indices
-                        perm = idx[torch.randperm(len(idx))[:min_count]]
-                        balanced_indices.append(perm)
-
-                    balanced_indices = torch.cat(balanced_indices)
-
-                    balanced_indices = balanced_indices[torch.randperm(len(balanced_indices))]
+                    if len(balanced_indices) < self.num_frames:
+                        additional_indices = torch.randint(low=0, high=img_t.shape[0], size=(self.num_frames - len(balanced_indices),))
+                        balanced_indices.extend(additional_indices.tolist())
+                        
+                    balanced_indices = torch.tensor(balanced_indices)
+                    balanced_indices = balanced_indices.sort().values
+                    
                     img_t = img_t[balanced_indices].contiguous()
                     img_labels_t = img_labels_t[balanced_indices].contiguous()
                 else:
@@ -1143,7 +1150,7 @@ class USAnnotatedBlindSweepDataModule(LightningDataModule):
         group.add_argument('--frame_column', type=str, default="frame_index")
         group.add_argument('--frame_label', type=str, default="annotation_label")
         group.add_argument('--frame_label_dict', type=str, default=None, help="Path to a json file containing the frame labels dictionary")
-        group.add_argument('--sample_balanced', type=bool, default=False, help="Whether to sample balanced batches")
+        group.add_argument('--sample_balanced', type=int, default=0, help="Whether to sample balanced batches")
         group.add_argument('--id_column', type=str, default="annotation_id")
         group.add_argument('--batch_size', type=int, default=4, help="Batch size for the train dataloaders")
         group.add_argument('--num_frames', type=int, default=64, help="Number of frames to sample from each cine")
