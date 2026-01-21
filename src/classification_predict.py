@@ -9,8 +9,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from loaders.ultrasound_dataset import USDataset
-from transforms.ultrasound_transforms import USClassEvalTransforms
-from nets.classification import EfficientNet
+from loaders.transforms.ultrasound_transforms import USClassEvalTransforms
+from nets import classification
 
 from sklearn.utils import class_weight
 from sklearn.metrics import classification_report
@@ -24,8 +24,11 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 
 def main(args):
     
-    
-    model = EfficientNet.load_from_checkpoint(args.model)
+    if(args.nn is not None):
+        NN = getattr(classification, args.nn)    
+    else:
+        NN = classification.EfficientNetClassification
+    model = NN.load_from_checkpoint(args.model)
     model.eval()
     model.cuda()
 
@@ -55,7 +58,7 @@ def main(args):
         test_ds = USDataset(df_test, img_column=args.img_column, class_column=args.class_column, mount_point=args.mount_point, transform=USClassEvalTransforms())    
     else:
 
-        test_ds = USDataset(df_test, img_column=args.img_column, mount_point=args.mount_point, transform=USClassEvalTransforms())
+        test_ds = USDataset(df_test, img_column=args.img_column, mount_point=args.mount_point, transform=USClassEvalTransforms(), repeat_channel=args.repeat_channel)
 
     test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True, prefetch_factor=4)
 
@@ -65,9 +68,12 @@ def main(args):
         probs = []
         features = []
         pbar = tqdm(enumerate(test_loader), total=len(test_loader))
-        for idx, X in pbar: 
+        for idx, batch in pbar: 
             if use_class_column:
-                X, Y = X
+                X = batch['img']
+                y = batch['class']
+            else:
+                X = batch['img']
             X = X.cuda().contiguous()   
             if args.extract_features:        
                 pred, x_f = model(X)    
@@ -117,8 +123,10 @@ if __name__ == '__main__':
     parser.add_argument('--csv', type=str, help='CSV file for testing', required=True)
     parser.add_argument('--extract_features', type=int, help='Extract the features', default=0)
     parser.add_argument('--img_column', type=str, help='Column name in the csv file with image path', default="uuid_path")
+    parser.add_argument('--repeat_channel', type=int, help='Repeat last channel to have 3 components', default=0)
     parser.add_argument('--class_column', type=str, help='Column name in the csv file with classes', default=None)
     parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float, help='Learning rate')
+    parser.add_argument('--nn', help='Type of NN', type=str, default=None)
     parser.add_argument('--model', help='Model path to continue training', type=str, default=None)
     parser.add_argument('--epochs', help='Max number of epochs', type=int, default=200)    
     parser.add_argument('--out', help='Output directory', type=str, default="./")
@@ -126,7 +134,6 @@ if __name__ == '__main__':
     parser.add_argument('--mount_point', help='Dataset mount directory', type=str, default="./")
     parser.add_argument('--num_workers', help='Number of workers for loading', type=int, default=4)
     parser.add_argument('--batch_size', help='Batch size', type=int, default=128)
-    parser.add_argument('--nn', help='Type of neural network', type=str, default="efficientnet_b0")
 
     args = parser.parse_args()
 
